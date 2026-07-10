@@ -1,8 +1,8 @@
 # frozen_string_literal: true
 
 cask "updatebar-app" do
-  version "0.2.0"
-  sha256 "aaa8f0d8948d2f08992ce0409d5df552dac55f8a8fedeb54d7f5297c50d69b56"
+  version "0.3.0"
+  sha256 "8980f0c316e7761bad9407e57eb9076831e1ec27f38877a891de8c1c858ae0ec"
 
   url "https://github.com/sonim1/UpdateBar/releases/download/v#{version}/UpdateBar-#{version}-macos-arm64.app.tar.gz"
   name "UpdateBar"
@@ -15,11 +15,11 @@ cask "updatebar-app" do
   app "UpdateBar.app"
 
   caveats <<~EOS
-    UpdateBar.app is currently unsigned. If macOS blocks the first launch,
-    Control-click UpdateBar.app in Finder, choose Open, then confirm Open.
-
     For the updatebar CLI, install the formula:
       brew install sonim1/tap/updatebar
+
+    For the Open TUI menu item, install the terminal UI:
+      brew install sonim1/tap/updatebar-tui
   EOS
 
   zap trash: [
