@@ -27,14 +27,6 @@ class UpdateReleaseTest < Minitest::Test
   ].freeze
   CI_WORKFLOW = REPOSITORY_ROOT.join(".github/workflows/ci.yml")
   CHECKOUT_ACTION = "actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5"
-  CI_CHECKOUT_WITH_KEYS = {
-    "contracts" => ["persist-credentials"],
-    "homebrew" => ["fetch-depth", "persist-credentials"],
-  }.freeze
-  CI_STEP_SEQUENCES = {
-    "contracts" => %w[checkout ruby-contracts bash-contracts],
-    "homebrew" => %w[checkout fetch-main changed-packages],
-  }.freeze
 
   def setup
     @temporary_directory = Dir.mktmpdir("update-release-test-")
@@ -403,12 +395,8 @@ class UpdateReleaseTest < Minitest::Test
 
     assert_equal "ubuntu-latest", job.fetch("runs-on")
     assert_equal 10, job["timeout-minutes"]
-    steps = job.fetch("steps")
-    assert_step_sequence("contracts", steps)
-    checkout = find_step_with_uses(steps, CHECKOUT_ACTION)
-    assert_equal false, checkout.fetch("with").fetch("persist-credentials")
-    assert_run_step(steps, "ruby test/update-release-test.rb")
-    assert_run_step(steps, "bash test/test-changed-packages-test.sh")
+    assert_equal %w[checkout ruby-contracts bash-contracts],
+                 job.fetch("steps").map { |step| normalize_ci_step("contracts", step) }
   end
 
   def test_homebrew_job_fetches_main_and_runs_changed_package_checks_on_macos
@@ -416,27 +404,8 @@ class UpdateReleaseTest < Minitest::Test
 
     assert_equal "macos-15", job.fetch("runs-on")
     assert_equal 30, job["timeout-minutes"]
-    steps = job.fetch("steps")
-    assert_step_sequence("homebrew", steps)
-    checkout = find_step_with_uses(steps, CHECKOUT_ACTION)
-    assert_equal 0, checkout.fetch("with").fetch("fetch-depth")
-    assert_equal false, checkout.fetch("with").fetch("persist-credentials")
-    assert_run_step(steps, "git fetch --no-tags origin main:refs/remotes/origin/main")
-    assert_run_step(steps, "scripts/test-changed-packages.sh origin/main")
-  end
-
-  def test_ci_step_sequence_contracts_reject_reordering_and_extra_steps
-    jobs = ci_workflow.fetch("jobs")
-
-    CI_STEP_SEQUENCES.each_key do |job_name|
-      steps = jobs.fetch(job_name).fetch("steps")
-      assert_raises(Minitest::Assertion) do
-        assert_step_sequence(job_name, steps.rotate)
-      end
-      assert_raises(Minitest::Assertion) do
-        assert_step_sequence(job_name, steps + [{ "run" => "echo unexpected" }])
-      end
-    end
+    assert_equal %w[checkout fetch-main changed-packages],
+                 job.fetch("steps").map { |step| normalize_ci_step("homebrew", step) }
   end
 
   def test_ci_workflow_has_no_job_secrets_or_write_permissions_and_pins_every_action
@@ -463,54 +432,34 @@ class UpdateReleaseTest < Minitest::Test
     Psych.safe_load(CI_WORKFLOW.read, aliases: false)
   end
 
-  def find_step_with_uses(steps, uses)
-    steps.find { |step| step["uses"] == uses } || flunk("expected a step using #{uses}")
-  end
-
-  def assert_step_sequence(job_name, steps)
-    assert_equal CI_STEP_SEQUENCES.fetch(job_name), semantic_step_sequence(job_name, steps)
-  end
-
-  def semantic_step_sequence(job_name, steps)
-    steps.map { |step| semantic_step_signature(job_name, step) }
-  end
-
-  def semantic_step_signature(job_name, step)
+  def normalize_ci_step(job_name, step)
     return "unexpected:shape:#{step.class}" unless step.is_a?(Hash)
 
-    if checkout_step_shape?(job_name, step)
-      return "checkout"
+    if step.keys.sort == %w[uses with] && step["uses"] == CHECKOUT_ACTION
+      expected_with = case job_name
+                      when "contracts" then { "persist-credentials" => false }
+                      when "homebrew" then { "fetch-depth" => 0, "persist-credentials" => false }
+                      end
+      return "checkout" if step["with"] == expected_with
     end
+
+    if step.keys.sort == ["run"]
+      return case [job_name, step.fetch("run")]
+             when ["contracts", "ruby test/update-release-test.rb"] then "ruby-contracts"
+             when ["contracts", "bash test/test-changed-packages-test.sh"] then "bash-contracts"
+             when ["homebrew", "git fetch --no-tags origin main:refs/remotes/origin/main"] then "fetch-main"
+             when ["homebrew", "scripts/test-changed-packages.sh origin/main"] then "changed-packages"
+             else "unexpected:run:#{step.fetch("run")}"
+             end
+    end
+
     if step.key?("uses")
-      return "unexpected:uses:#{step["uses"]}"
+      "unexpected:uses:#{step["uses"]}"
+    elsif step.key?("run")
+      "unexpected:run:#{step["run"]}"
+    else
+      "unexpected:shape:#{step.keys.sort.join(",")}"
     end
-    if step.key?("run")
-      return run_step_signature(job_name, step) if step.keys.sort == ["run"]
-
-      return "unexpected:run:#{step["run"]}"
-    end
-
-    "unexpected:shape:#{step.keys.sort.join(",")}"
-  end
-
-  def checkout_step_shape?(job_name, step)
-    step.keys.sort == %w[uses with] &&
-      step["uses"] == CHECKOUT_ACTION &&
-      step["with"].is_a?(Hash) &&
-      step["with"].keys.sort == CI_CHECKOUT_WITH_KEYS.fetch(job_name).sort
-  end
-
-  def run_step_signature(job_name, step)
-    {
-      ["contracts", "ruby test/update-release-test.rb"] => "ruby-contracts",
-      ["contracts", "bash test/test-changed-packages-test.sh"] => "bash-contracts",
-      ["homebrew", "git fetch --no-tags origin main:refs/remotes/origin/main"] => "fetch-main",
-      ["homebrew", "scripts/test-changed-packages.sh origin/main"] => "changed-packages",
-    }.fetch([job_name, step.fetch("run")], "unexpected:run:#{step.fetch("run")}")
-  end
-
-  def assert_run_step(steps, command)
-    assert steps.any? { |step| step["run"] == command }, "expected a step running #{command}"
   end
 
   def collect_uses(value)
