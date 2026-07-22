@@ -26,7 +26,9 @@ class UpdateReleaseTest < Minitest::Test
     "Templates/Formula/updatebar-tui.rb.erb",
   ].freeze
   CI_WORKFLOW = REPOSITORY_ROOT.join(".github/workflows/ci.yml")
+  UPDATE_WORKFLOW = REPOSITORY_ROOT.join(".github/workflows/update-package.yml")
   CHECKOUT_ACTION = "actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5"
+  APP_TOKEN_ACTION = "actions/create-github-app-token@67018539274d69449ef7c02e8e71183d1719ab42"
 
   def setup
     @temporary_directory = Dir.mktmpdir("update-release-test-")
@@ -424,12 +426,184 @@ class UpdateReleaseTest < Minitest::Test
     refute_match(/\bwrite\b/, workflow.fetch("permissions").values.join(" "))
   end
 
+  def test_update_workflow_accepts_only_typed_release_dispatches
+    workflow = update_workflow
+
+    assert_equal "Update package", workflow.fetch("name")
+    assert_equal({ "repository_dispatch" => { "types" => ["homebrew_release"] } }, workflow.fetch("on"))
+    assert_equal({ "contents" => "read" }, workflow.fetch("permissions"))
+    assert_equal({
+      "group" => "homebrew-release-${{ github.event.client_payload.repository }}-${{ github.event.client_payload.tag }}",
+      "cancel-in-progress" => false,
+    }, workflow.fetch("concurrency"))
+  end
+
+  def test_update_workflow_has_one_bounded_update_job_with_exact_write_permissions
+    jobs = update_workflow.fetch("jobs")
+    assert_equal ["update"], jobs.keys
+
+    job = jobs.fetch("update")
+    assert_equal "ubuntu-latest", job.fetch("runs-on")
+    assert_equal 15, job.fetch("timeout-minutes")
+    assert_equal({ "contents" => "write", "pull-requests" => "write" }, job.fetch("permissions"))
+    refute job.key?("secrets")
+    assert_equal %w[validate download-manifest app-token checkout prepare-branch update-packages publish-pr],
+                 job.fetch("steps").map { |step| step.fetch("id") }
+  end
+
+  def test_update_workflow_uses_the_restricted_app_token_for_checkout
+    app_token = update_step("app-token")
+    assert_equal APP_TOKEN_ACTION, app_token.fetch("uses")
+    assert_equal({
+      "app-id" => "${{ vars.TAP_GITHUB_APP_ID }}",
+      "private-key" => "${{ secrets.TAP_GITHUB_APP_PRIVATE_KEY }}",
+      "owner" => "sonim1",
+      "repositories" => "homebrew-tap",
+    }, app_token.fetch("with"))
+
+    checkout = update_step("checkout")
+    assert_equal CHECKOUT_ACTION, checkout.fetch("uses")
+    assert_equal({
+      "token" => "${{ steps.app-token.outputs.token }}",
+      "fetch-depth" => 0,
+    }, checkout.fetch("with"))
+  end
+
+  def test_update_workflow_validates_inert_payload_values_and_derives_both_products
+    step = update_step("validate")
+    assert_equal({
+      "PAYLOAD_REPOSITORY" => "${{ github.event.client_payload.repository }}",
+      "PAYLOAD_TAG" => "${{ github.event.client_payload.tag }}",
+    }, step.fetch("env"))
+
+    script = step.fetch("run")
+    assert_shell_strict(script)
+    assert_includes script, 'SOURCE_REPOSITORY="$PAYLOAD_REPOSITORY"'
+    assert_includes script, 'RELEASE_TAG="$PAYLOAD_TAG"'
+    assert_match(/sonim1\/switchtab\).*?PRODUCT="switchtab"/m, script)
+    assert_match(/sonim1\/UpdateBar\).*?PRODUCT="updatebar"/m, script)
+    assert_includes script, '[[ ! "$RELEASE_TAG" =~ ^v[0-9]+([.][0-9]+)*$ ]]'
+    assert_includes script, 'VERSION="${RELEASE_TAG#v}"'
+    assert_includes script, 'RELEASE_BRANCH="release/${PRODUCT}-${VERSION}"'
+    assert_includes script, '>> "$GITHUB_ENV"'
+    assert_includes script, '>> "$GITHUB_OUTPUT"'
+    refute_match(/\$\{\{\s*github\.event\.client_payload\./, script)
+    refute_match(/\b(?:gh|git)\b/, script)
+  end
+
+  def test_update_workflow_prepares_the_deterministic_branch_before_running_the_updater
+    prepare = update_step("prepare-branch").fetch("run")
+    assert_shell_strict(prepare)
+    assert_includes prepare, "git fetch --no-tags origin main:refs/remotes/origin/main"
+    assert_includes prepare, 'git ls-remote --exit-code --heads origin "refs/heads/$RELEASE_BRANCH"'
+    assert_includes prepare,
+                    'git fetch --no-tags origin "refs/heads/$RELEASE_BRANCH:refs/remotes/origin/$RELEASE_BRANCH"'
+    assert_includes prepare, 'REMOTE_BRANCH_SHA="$(git rev-parse "refs/remotes/origin/$RELEASE_BRANCH")"'
+    assert_includes prepare, 'git checkout -B "$RELEASE_BRANCH" origin/main'
+
+    step_ids = update_workflow.fetch("jobs").fetch("update").fetch("steps").map { |step| step.fetch("id") }
+    assert_operator step_ids.index("validate"), :<, step_ids.index("prepare-branch")
+    assert_operator step_ids.index("download-manifest"), :<, step_ids.index("prepare-branch")
+    assert_operator step_ids.index("prepare-branch"), :<, step_ids.index("update-packages")
+  end
+
+  def test_update_workflow_downloads_only_the_exact_manifest_with_the_read_token
+    step = update_step("download-manifest")
+    assert_equal({ "GH_TOKEN" => "${{ github.token }}" }, step.fetch("env"))
+
+    script = step.fetch("run")
+    assert_shell_strict(script)
+    assert_includes script, 'MANIFEST_FILE="$RUNNER_TEMP/release-manifest.json"'
+    assert_includes script, '[[ -e "$MANIFEST_FILE" || -L "$MANIFEST_FILE" ]]'
+    assert_includes script, 'gh release download "$RELEASE_TAG"'
+    assert_includes script, '--repo "$SOURCE_REPOSITORY"'
+    assert_includes script, '--pattern "release-manifest.json"'
+    assert_includes script, '--dir "$RUNNER_TEMP"'
+    assert_includes script, '[[ ! -f "$MANIFEST_FILE" || -L "$MANIFEST_FILE" ]]'
+    refute_includes script, "${{ steps.app-token.outputs.token }}"
+  end
+
+  def test_update_workflow_runs_the_allowlisted_updater_with_only_validated_inputs
+    step = update_step("update-packages")
+    assert_equal({ "GH_TOKEN" => "${{ github.token }}" }, step.fetch("env"))
+
+    script = step.fetch("run")
+    assert_shell_strict(script)
+    assert_includes script,
+                    'TAP_MANIFEST_FILE="$MANIFEST_FILE" GH_TOKEN="$GH_TOKEN" ruby scripts/update-release.rb '
+    assert_includes script, '--repository "$SOURCE_REPOSITORY" --tag "$RELEASE_TAG"'
+
+    payload_fields = UPDATE_WORKFLOW.read.scan(/github\.event\.client_payload\.([A-Za-z0-9_-]+)/).flatten.uniq.sort
+    assert_equal %w[repository tag], payload_fields
+  end
+
+  def test_update_workflow_stages_only_packages_and_safely_updates_one_pr
+    step = update_step("publish-pr")
+    assert_equal({ "GH_TOKEN" => "${{ steps.app-token.outputs.token }}" }, step.fetch("env"))
+
+    script = step.fetch("run")
+    assert_shell_strict(script)
+    assert_includes script, "git diff --name-only -- . ':(exclude)Formula/**' ':(exclude)Casks/**'"
+    assert_includes script, "git add -- Formula/ Casks/"
+    assert_includes script, "git diff --cached --quiet"
+    assert_includes script, "No package changes; nothing to publish."
+    assert_includes script, "git diff --cached --name-only -- . ':(exclude)Formula/**' ':(exclude)Casks/**'"
+    assert_includes script, 'git config user.name "homebrew-release-bot[bot]"'
+    assert_includes script, 'git config user.email "homebrew-release-bot[bot]@users.noreply.github.com"'
+    assert_includes script, 'git commit -m "chore(${PRODUCT}): update to ${VERSION}"'
+    assert_includes script, 'git push --force-with-lease="$LEASE" origin "HEAD:refs/heads/${RELEASE_BRANCH}"'
+    refute_match(/git push[^\n]*--force(?:\s|$)/, script)
+    assert_includes script, "gh api --method GET repos/sonim1/homebrew-tap/pulls"
+    assert_includes script, '-f "head=sonim1:${RELEASE_BRANCH}"'
+    refute_includes script, "gh pr list"
+    assert_includes script,
+                    'gh pr create --repo sonim1/homebrew-tap --base main --head "$RELEASE_BRANCH"'
+    assert_includes script, 'gh pr merge "$PR_NUMBER" --repo sonim1/homebrew-tap --auto --squash'
+  end
+
+  def test_update_workflow_pins_actions_and_has_no_payload_execution_or_destructive_rollback
+    workflow = update_workflow
+    workflow_text = UPDATE_WORKFLOW.read
+
+    assert_equal [APP_TOKEN_ACTION, CHECKOUT_ACTION], collect_uses(workflow)
+    collect_uses(workflow).each do |uses|
+      assert_match(/\Aactions\/[^@]+@[0-9a-f]{40}\z/, uses)
+    end
+
+    workflow.fetch("jobs").fetch("update").fetch("steps").each do |step|
+      next unless step.key?("run")
+
+      refute_match(/\$\{\{\s*github\.event\.client_payload\./, step.fetch("run"))
+    end
+    refute_match(/pull_request_target/, workflow_text)
+    refute_match(/\brm\s+-rf\b|\bgit\s+(?:reset\s+--hard|clean\b)/, workflow_text)
+    refute_match(/\bgh\s+release\s+(?:delete|edit|upload)\b/, workflow_text)
+    assert_equal 1, workflow_text.scan(/\bgh\s+release\s+download\b/).length
+  end
+
   private
 
   def ci_workflow
     assert CI_WORKFLOW.file?, "expected #{CI_WORKFLOW} to exist"
 
     Psych.safe_load(CI_WORKFLOW.read, aliases: false)
+  end
+
+  def update_workflow
+    assert UPDATE_WORKFLOW.file?, "expected #{UPDATE_WORKFLOW} to exist"
+
+    Psych.safe_load(UPDATE_WORKFLOW.read, aliases: false)
+  end
+
+  def update_step(id)
+    steps = update_workflow.fetch("jobs").fetch("update").fetch("steps")
+    step = steps.find { |candidate| candidate["id"] == id }
+    refute_nil step, "expected update workflow step #{id.inspect}"
+    step
+  end
+
+  def assert_shell_strict(script)
+    assert_equal "set -euo pipefail", script.lines.first&.strip
   end
 
   def normalize_ci_step(job_name, step)

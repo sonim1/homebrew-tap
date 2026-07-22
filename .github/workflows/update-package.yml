@@ -1,0 +1,188 @@
+name: Update package
+
+'on':
+  repository_dispatch:
+    types: [homebrew_release]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: homebrew-release-${{ github.event.client_payload.repository }}-${{ github.event.client_payload.tag }}
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Validate release payload
+        id: validate
+        env:
+          PAYLOAD_REPOSITORY: ${{ github.event.client_payload.repository }}
+          PAYLOAD_TAG: ${{ github.event.client_payload.tag }}
+        run: |
+          set -euo pipefail
+
+          SOURCE_REPOSITORY="$PAYLOAD_REPOSITORY"
+          RELEASE_TAG="$PAYLOAD_TAG"
+
+          case "$SOURCE_REPOSITORY" in
+            sonim1/switchtab)
+              PRODUCT="switchtab"
+              ;;
+            sonim1/UpdateBar)
+              PRODUCT="updatebar"
+              ;;
+            *)
+              printf 'Unsupported release repository: %s\n' "$SOURCE_REPOSITORY" >&2
+              exit 64
+              ;;
+          esac
+
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+([.][0-9]+)*$ ]]; then
+            printf 'Invalid release tag: %s\n' "$RELEASE_TAG" >&2
+            exit 64
+          fi
+
+          VERSION="${RELEASE_TAG#v}"
+          RELEASE_BRANCH="release/${PRODUCT}-${VERSION}"
+
+          {
+            printf 'SOURCE_REPOSITORY=%s\n' "$SOURCE_REPOSITORY"
+            printf 'RELEASE_TAG=%s\n' "$RELEASE_TAG"
+            printf 'PRODUCT=%s\n' "$PRODUCT"
+            printf 'VERSION=%s\n' "$VERSION"
+            printf 'RELEASE_BRANCH=%s\n' "$RELEASE_BRANCH"
+          } >> "$GITHUB_ENV"
+          {
+            printf 'repository=%s\n' "$SOURCE_REPOSITORY"
+            printf 'tag=%s\n' "$RELEASE_TAG"
+            printf 'product=%s\n' "$PRODUCT"
+            printf 'version=%s\n' "$VERSION"
+            printf 'branch=%s\n' "$RELEASE_BRANCH"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Download release manifest
+        id: download-manifest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          if [[ "$RUNNER_TEMP" != /* || ! -d "$RUNNER_TEMP" || -L "$RUNNER_TEMP" ]]; then
+            printf 'Unsafe runner temporary directory\n' >&2
+            exit 1
+          fi
+
+          MANIFEST_FILE="$RUNNER_TEMP/release-manifest.json"
+          if [[ -e "$MANIFEST_FILE" || -L "$MANIFEST_FILE" ]]; then
+            printf 'Manifest target already exists or is a symlink: %s\n' "$MANIFEST_FILE" >&2
+            exit 1
+          fi
+
+          gh release download "$RELEASE_TAG" \
+            --repo "$SOURCE_REPOSITORY" \
+            --pattern "release-manifest.json" \
+            --dir "$RUNNER_TEMP"
+
+          if [[ ! -f "$MANIFEST_FILE" || -L "$MANIFEST_FILE" ]]; then
+            printf 'Downloaded manifest is not a regular file: %s\n' "$MANIFEST_FILE" >&2
+            exit 1
+          fi
+
+          printf 'MANIFEST_FILE=%s\n' "$MANIFEST_FILE" >> "$GITHUB_ENV"
+          printf 'manifest=%s\n' "$MANIFEST_FILE" >> "$GITHUB_OUTPUT"
+
+      - name: Create tap GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@67018539274d69449ef7c02e8e71183d1719ab42
+        with:
+          app-id: ${{ vars.TAP_GITHUB_APP_ID }}
+          private-key: ${{ secrets.TAP_GITHUB_APP_PRIVATE_KEY }}
+          owner: sonim1
+          repositories: homebrew-tap
+
+      - name: Check out tap
+        id: checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          fetch-depth: 0
+
+      - name: Prepare deterministic release branch
+        id: prepare-branch
+        run: |
+          set -euo pipefail
+
+          git fetch --no-tags origin main:refs/remotes/origin/main
+
+          REMOTE_BRANCH_SHA=""
+          if git ls-remote --exit-code --heads origin "refs/heads/$RELEASE_BRANCH" >/dev/null 2>&1; then
+            git fetch --no-tags origin "refs/heads/$RELEASE_BRANCH:refs/remotes/origin/$RELEASE_BRANCH"
+            REMOTE_BRANCH_SHA="$(git rev-parse "refs/remotes/origin/$RELEASE_BRANCH")"
+          fi
+
+          git checkout -B "$RELEASE_BRANCH" origin/main
+
+          printf 'REMOTE_BRANCH_SHA=%s\n' "$REMOTE_BRANCH_SHA" >> "$GITHUB_ENV"
+          printf 'remote-sha=%s\n' "$REMOTE_BRANCH_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Update package definitions
+        id: update-packages
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          TAP_MANIFEST_FILE="$MANIFEST_FILE" GH_TOKEN="$GH_TOKEN" ruby scripts/update-release.rb --repository "$SOURCE_REPOSITORY" --tag "$RELEASE_TAG"
+
+      - name: Publish pull request
+        id: publish-pr
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+
+          UNEXPECTED_TRACKED="$(git diff --name-only -- . ':(exclude)Formula/**' ':(exclude)Casks/**')"
+          if [[ -n "$UNEXPECTED_TRACKED" ]]; then
+            printf 'Updater changed unexpected tracked paths:\n%s\n' "$UNEXPECTED_TRACKED" >&2
+            exit 1
+          fi
+
+          git add -- Formula/ Casks/
+          if git diff --cached --quiet; then
+            printf 'No package changes; nothing to publish.\n'
+            exit 0
+          fi
+
+          UNEXPECTED_STAGED="$(git diff --cached --name-only -- . ':(exclude)Formula/**' ':(exclude)Casks/**')"
+          if [[ -n "$UNEXPECTED_STAGED" ]]; then
+            printf 'Unexpected paths were staged:\n%s\n' "$UNEXPECTED_STAGED" >&2
+            exit 1
+          fi
+
+          git config user.name "homebrew-release-bot[bot]"
+          git config user.email "homebrew-release-bot[bot]@users.noreply.github.com"
+          git commit -m "chore(${PRODUCT}): update to ${VERSION}"
+
+          LEASE="refs/heads/${RELEASE_BRANCH}:${REMOTE_BRANCH_SHA}"
+          git push --force-with-lease="$LEASE" origin "HEAD:refs/heads/${RELEASE_BRANCH}"
+
+          PR_TITLE="chore(${PRODUCT}): update to ${VERSION}"
+          PR_BODY="Automated Homebrew package update for ${SOURCE_REPOSITORY} ${RELEASE_TAG}."
+          PR_NUMBER="$(gh api --method GET repos/sonim1/homebrew-tap/pulls -f state=open -f base=main -f "head=sonim1:${RELEASE_BRANCH}" --jq '.[0].number // empty')"
+          if [[ -z "$PR_NUMBER" ]]; then
+            PR_URL="$(gh pr create --repo sonim1/homebrew-tap --base main --head "$RELEASE_BRANCH" --title "$PR_TITLE" --body "$PR_BODY")"
+            PR_NUMBER="$(gh pr view "$PR_URL" --repo sonim1/homebrew-tap --json number --jq '.number')"
+          fi
+
+          if [[ ! "$PR_NUMBER" =~ ^[0-9]+$ ]]; then
+            printf 'Could not resolve pull request number\n' >&2
+            exit 1
+          fi
+
+          gh pr merge "$PR_NUMBER" --repo sonim1/homebrew-tap --auto --squash
