@@ -668,12 +668,25 @@ class UpdateReleaseTest < Minitest::Test
     assert_includes script, "git ls-files --others --exclude-standard -z -- Formula/ Casks/"
     assert_includes script, 'git add -- "${package_files[@]}"'
     assert_includes script, "git diff --cached --name-only -z --"
+    assert_includes script, 'PUBLISH_TEMP_ROOT="${RUNNER_TEMP:-${TMPDIR:-}}"'
+    assert_includes script, 'PUBLISH_TEMP_DIR="$(mktemp -d "$PUBLISH_TEMP_ROOT/tap-publish.XXXXXX")"'
+    assert_includes script, 'git diff --name-only -z HEAD -- > "$TRACKED_PATHS_FILE"'
+    assert_includes script,
+                    'git ls-files --others --exclude-standard -z -- Formula/ Casks/ > "$UNTRACKED_PATHS_FILE"'
+    assert_includes script, 'git diff --cached --name-only -z -- > "$STAGED_PATHS_FILE"'
+    assert_includes script, 'done < "$TRACKED_PATHS_FILE"'
+    assert_includes script, 'done < "$UNTRACKED_PATHS_FILE"'
+    assert_includes script, 'done < "$STAGED_PATHS_FILE"'
+    refute_match(/done\s+<\s+<\(git\s+(?:diff|ls-files)\b/, script)
+    assert_includes script,
+                    'rm -f -- "$TRACKED_PATHS_FILE" "$UNTRACKED_PATHS_FILE" "$STAGED_PATHS_FILE"'
+    assert_includes script, 'rmdir -- "$PUBLISH_TEMP_DIR"'
     refute_includes script, "git add -- Formula/ Casks/"
     assert_includes script, "No package changes; nothing to publish."
     assert_includes script, 'git config user.name "homebrew-release-bot[bot]"'
     assert_includes script, 'git config user.email "homebrew-release-bot[bot]@users.noreply.github.com"'
     assert_includes script, 'git commit -m "chore(${PRODUCT}): update to ${VERSION}"'
-    assert_includes script, "trap cleanup_git_credentials EXIT"
+    assert_includes script, "trap cleanup_publish EXIT"
     assert_includes script, "git config --local credential.helper '!gh auth git-credential'"
     assert_includes script, "git config --local --unset-all credential.helper"
     assert_includes script, 'git push --force-with-lease="$LEASE" origin "HEAD:refs/heads/${RELEASE_BRANCH}"'
@@ -688,6 +701,20 @@ class UpdateReleaseTest < Minitest::Test
     assert_includes script, 'HEAD_COMMIT="$(git rev-parse HEAD)"'
     assert_includes script,
                     'gh pr merge "$PR_NUMBER" --repo sonim1/homebrew-tap --auto --squash --match-head-commit "$HEAD_COMMIT"'
+    assert_operator script.index("trap cleanup_publish EXIT"), :<,
+                    script.index('git diff --name-only -z HEAD -- > "$TRACKED_PATHS_FILE"')
+  end
+
+  def test_publish_propagates_tracked_diff_producer_failure
+    assert_publish_propagates_git_enumeration_failure("tracked")
+  end
+
+  def test_publish_propagates_untracked_ls_files_producer_failure
+    assert_publish_propagates_git_enumeration_failure("untracked")
+  end
+
+  def test_publish_propagates_staged_diff_producer_failure
+    assert_publish_propagates_git_enumeration_failure("staged", package_change: true)
   end
 
   def test_publish_rejects_an_unexpected_untracked_package_path_nul_safely
@@ -913,6 +940,7 @@ class UpdateReleaseTest < Minitest::Test
     write_workflow_fake_gh
     {
       "PATH" => "#{@workflow_bin}:#{ENV.fetch('PATH')}",
+      "TMPDIR" => @tap.to_s,
       "GH_TOKEN" => "test-app-token",
       "GITHUB_ENV" => @tap.join("workflow-github-env").to_s,
       "GITHUB_OUTPUT" => @tap.join("workflow-github-output").to_s,
@@ -1089,6 +1117,52 @@ class UpdateReleaseTest < Minitest::Test
     )
     refute status.success?, "credential helper remained configured: #{stdout}"
     assert_empty stdout
+  end
+
+  def assert_publish_propagates_git_enumeration_failure(mode, package_change: false)
+    repository = create_workflow_repository
+    worktree = repository.fetch(:worktree)
+    git_success!(worktree, "checkout", "-b", "release/switchtab-1.2.3")
+    worktree.join("Casks/switchtab.rb").write("switchtab v2\n") if package_change
+    original_head = git_success!(worktree, "rev-parse", "HEAD")
+    fake_git_bin = write_git_enumeration_failure_wrapper
+
+    result = run_workflow_step(
+      "publish-pr",
+      directory: worktree,
+      environment: workflow_publish_environment.merge(
+        "PATH" => "#{fake_git_bin}:#{workflow_environment.fetch('PATH')}",
+        "FAKE_GIT_ENUMERATION_FAILURE" => mode,
+        "REAL_GIT" => git_executable,
+      ),
+    )
+
+    assert_equal 73, result.fetch(:status).exitstatus, result.fetch(:stderr)
+    assert_equal original_head, git_success!(worktree, "rev-parse", "HEAD")
+    assert_equal 2, remote_branch_status(repository.fetch(:remote), "release/switchtab-1.2.3")
+    assert_empty workflow_tool_calls
+    assert_no_local_credential_helper(worktree)
+    assert_empty Dir.glob(@tap.join("tap-publish.*").to_s)
+  end
+
+  def write_git_enumeration_failure_wrapper
+    directory = @tap.join("enumeration-failure-git-bin")
+    FileUtils.mkdir_p(directory)
+    wrapper = directory.join("git")
+    wrapper.write(<<~'RUBY')
+      #!/usr/bin/env ruby
+      failures = {
+        "tracked" => %w[diff --name-only -z HEAD --],
+        "untracked" => ["ls-files", "--others", "--exclude-standard", "-z", "--", "Formula/", "Casks/"],
+        "staged" => %w[diff --cached --name-only -z --],
+      }
+      expected = failures.fetch(ENV.fetch("FAKE_GIT_ENUMERATION_FAILURE"))
+      exit 73 if ARGV == expected
+
+      exec ENV.fetch("REAL_GIT"), *ARGV
+    RUBY
+    FileUtils.chmod(0o755, wrapper)
+    directory
   end
 
   def write_failing_ls_remote_git

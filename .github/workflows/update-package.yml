@@ -196,6 +196,25 @@ jobs:
         run: |
           set -euo pipefail
 
+          PUBLISH_TEMP_ROOT="${RUNNER_TEMP:-${TMPDIR:-}}"
+          if [[ -z "$PUBLISH_TEMP_ROOT" || "$PUBLISH_TEMP_ROOT" != /* ||
+                ! -d "$PUBLISH_TEMP_ROOT" || -L "$PUBLISH_TEMP_ROOT" ]]; then
+            printf 'Unsafe publish temporary directory root\n' >&2
+            exit 1
+          fi
+          PUBLISH_TEMP_DIR="$(mktemp -d "$PUBLISH_TEMP_ROOT/tap-publish.XXXXXX")"
+          TRACKED_PATHS_FILE="$PUBLISH_TEMP_DIR/tracked-paths"
+          UNTRACKED_PATHS_FILE="$PUBLISH_TEMP_DIR/untracked-paths"
+          STAGED_PATHS_FILE="$PUBLISH_TEMP_DIR/staged-paths"
+
+          cleanup_publish() {
+            git config --local --unset-all credential.helper >/dev/null 2>&1 || :
+            rm -f -- "$TRACKED_PATHS_FILE" "$UNTRACKED_PATHS_FILE" "$STAGED_PATHS_FILE" \
+              >/dev/null 2>&1 || :
+            rmdir -- "$PUBLISH_TEMP_DIR" >/dev/null 2>&1 || :
+          }
+          trap cleanup_publish EXIT
+
           case "$PRODUCT" in
             switchtab)
               package_files=("Casks/switchtab.rb")
@@ -219,14 +238,16 @@ jobs:
           }
 
           tracked_paths=()
+          git diff --name-only -z HEAD -- > "$TRACKED_PATHS_FILE"
           while IFS= read -r -d '' path; do
             tracked_paths+=("$path")
-          done < <(git diff --name-only -z HEAD --)
+          done < "$TRACKED_PATHS_FILE"
 
           untracked_package_paths=()
+          git ls-files --others --exclude-standard -z -- Formula/ Casks/ > "$UNTRACKED_PATHS_FILE"
           while IFS= read -r -d '' path; do
             untracked_package_paths+=("$path")
-          done < <(git ls-files --others --exclude-standard -z -- Formula/ Casks/)
+          done < "$UNTRACKED_PATHS_FILE"
 
           for path in "${tracked_paths[@]+"${tracked_paths[@]}"}" \
                       "${untracked_package_paths[@]+"${untracked_package_paths[@]}"}"; do
@@ -244,9 +265,10 @@ jobs:
           git add -- "${package_files[@]}"
 
           staged_paths=()
+          git diff --cached --name-only -z -- > "$STAGED_PATHS_FILE"
           while IFS= read -r -d '' path; do
             staged_paths+=("$path")
-          done < <(git diff --cached --name-only -z --)
+          done < "$STAGED_PATHS_FILE"
           if (( ${#staged_paths[@]} == 0 )); then
             printf 'No package changes; nothing to publish.\n'
             exit 0
@@ -262,10 +284,6 @@ jobs:
           git config user.email "homebrew-release-bot[bot]@users.noreply.github.com"
           git commit -m "chore(${PRODUCT}): update to ${VERSION}"
 
-          cleanup_git_credentials() {
-            git config --local --unset-all credential.helper >/dev/null 2>&1 || :
-          }
-          trap cleanup_git_credentials EXIT
           git config --local credential.helper '!gh auth git-credential'
 
           LEASE="refs/heads/${RELEASE_BRANCH}:${REMOTE_BRANCH_SHA}"
