@@ -276,12 +276,68 @@ class UpdateReleaseTest < Minitest::Test
                     repository: "sonim1/UpdateBar", environment: { "FAKE_CURL_FAIL" => "1" })
   end
 
+  def test_rolls_back_every_updatebar_destination_when_the_second_commit_rename_fails
+    old_bytes = {
+      "Formula/updatebar.rb" => "# old updatebar\nversion \"0.9.0\"\n",
+      "Casks/updatebar-app.rb" => "# old updatebar app\nversion \"0.9.0\"\n",
+      "Formula/updatebar-tui.rb" => "# old updatebar tui\nversion \"0.9.0\"\n",
+    }
+    old_bytes.each { |relative_path, contents| write_destination(relative_path, contents) }
+    rename_failure_preload = write_rename_failure_preload
+    rename_log = @tap.join("rename-calls.log")
+
+    result = run_updater(
+      updatebar_manifest,
+      repository: "sonim1/UpdateBar",
+      environment: {
+        "RUBYOPT" => "-r#{rename_failure_preload}",
+        "FAKE_RENAME_FAILURE_PATH" => @tap.join("Casks/updatebar-app.rb").to_s,
+        "FAKE_RENAME_LOG" => rename_log.to_s,
+      },
+    )
+
+    refute result.fetch(:status).success?, "rename calls: #{rename_log.file? ? rename_log.read : 'preload not loaded'}"
+    old_bytes.each do |relative_path, contents|
+      assert_equal contents, @tap.join(relative_path).binread,
+                   "#{relative_path} was not rolled back; stderr: #{result.fetch(:stderr)}"
+    end
+    assert_match(/transactional destination update failed/, result.fetch(:stderr))
+    assert_equal %w[gh gh curl], tool_calls.map { |call| call.fetch("tool") }
+    assert_empty Dir.glob(@tap.join("{Formula,Casks}/.update-release-*").to_s)
+  end
+
   def test_refuses_to_replace_a_destination_containing_a_newer_version
     destination = @tap.join("Casks/switchtab.rb")
     FileUtils.mkdir_p(destination.dirname)
     destination.write("cask \"switchtab\" do\n  version \"2.0.0\"\nend\n")
 
     assert_rejected(switchtab_manifest, /refusing to replace switchtab version 2.0.0 with older version 1.0.0/)
+  end
+
+  def test_refuses_installed_1_0_1_as_newer_than_incoming_1_0
+    write_destination("Casks/switchtab.rb", "cask \"switchtab\" do\n  version \"1.0.1\"\nend\n")
+
+    assert_rejected(switchtab_manifest_for_version("1.0"),
+                    /refusing to replace switchtab version 1.0.1 with older version 1.0/,
+                    tag: "v1.0")
+  end
+
+  def test_allows_incoming_1_0_1_over_installed_1_0
+    write_destination("Casks/switchtab.rb", "cask \"switchtab\" do\n  version \"1.0\"\nend\n")
+
+    result = run_updater(switchtab_manifest_for_version("1.0.1"), tag: "v1.0.1")
+
+    assert_success(result)
+    assert_includes @tap.join("Casks/switchtab.rb").binread, 'version "1.0.1"'
+  end
+
+  def test_treats_1_0_and_1_0_0_as_equivalent_versions
+    write_destination("Casks/switchtab.rb", "cask \"switchtab\" do\n  version \"1.0\"\nend\n")
+
+    result = run_updater(switchtab_manifest)
+
+    assert_success(result)
+    assert_includes @tap.join("Casks/switchtab.rb").binread, 'version "1.0.0"'
   end
 
   def test_a_byte_identical_rerun_succeeds
@@ -379,6 +435,18 @@ class UpdateReleaseTest < Minitest::Test
     }
   end
 
+  def switchtab_manifest_for_version(version)
+    asset_name = "SwitchTab-#{version}-1.dmg"
+    write_fixture(asset_name, "switchtab #{version} dmg fixture\n")
+    manifest = switchtab_manifest
+    manifest["tag"] = "v#{version}"
+    manifest["version"] = version
+    source = manifest.fetch("packages").fetch(0).fetch("source")
+    source["name"] = asset_name
+    source["sha256"] = fixture_sha256(asset_name)
+    manifest
+  end
+
   def run_updater(manifest, repository: "sonim1/switchtab", tag: "v1.0.0", environment: {})
     contents = manifest.is_a?(String) ? manifest : JSON.generate(manifest)
     @manifest_path.binwrite(contents)
@@ -432,6 +500,40 @@ class UpdateReleaseTest < Minitest::Test
       FileUtils.mkdir_p(path.dirname)
       path.write("# sentinel for #{relative_path}\nversion \"0.0.1\"\n")
     end
+  end
+
+  def write_destination(relative_path, contents)
+    path = @tap.join(relative_path)
+    FileUtils.mkdir_p(path.dirname)
+    path.binwrite(contents)
+  end
+
+  def write_rename_failure_preload
+    preload = @tap.join("fail-destination-rename.rb")
+    preload.write(<<~'RUBY')
+      class << File
+        alias_method :update_release_original_rename, :rename
+
+        def rename(source, destination)
+          if ENV["FAKE_RENAME_LOG"]
+            File.open(ENV.fetch("FAKE_RENAME_LOG"), "a") { |log| log.puts("#{source}\t#{destination}") }
+          end
+          failure_path = ENV["FAKE_RENAME_FAILURE_PATH"]
+          normalized_destination = File.join(File.realpath(File.dirname(destination.to_s)), File.basename(destination.to_s))
+          normalized_failure_path = if failure_path
+                                      File.join(File.realpath(File.dirname(failure_path)), File.basename(failure_path))
+                                    end
+          if !@update_release_rename_failed && failure_path &&
+             normalized_destination == normalized_failure_path
+            @update_release_rename_failed = true
+            raise Errno::EACCES, destination.to_s
+          end
+
+          update_release_original_rename(source, destination)
+        end
+      end
+    RUBY
+    preload
   end
 
   def write_fixture(name, contents)

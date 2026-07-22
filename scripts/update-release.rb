@@ -100,7 +100,7 @@ class ReleaseUpdater
     refuse_downgrades(packages, configurations, version)
     rendered_destinations = render_destinations(packages, configurations, version)
     verify_downloaded_sources(packages, configurations)
-    rendered_destinations.each { |destination, contents| atomic_write(destination, contents) }
+    write_transaction(rendered_destinations)
   end
 
   private
@@ -346,22 +346,110 @@ class ReleaseUpdater
     "#{message} (exit #{status.exitstatus})#{suffix}"
   end
 
-  def atomic_write(destination, contents)
-    return if destination.file? && destination.binread == contents
+  def write_transaction(rendered_destinations)
+    entries = []
+    preflight_destinations(rendered_destinations.keys)
+    begin
+      stage_destinations(rendered_destinations, entries)
+      prepare_backups(entries)
+      commit_staged_destinations(entries)
+    ensure
+      cleanup_transaction_files(entries)
+    end
+  end
 
-    FileUtils.mkdir_p(destination.dirname)
-    mode = destination.file? ? destination.stat.mode & 0o777 : 0o644
-    Tempfile.create([".#{destination.basename}", ".tmp"], destination.dirname.to_s) do |temporary_file|
+  def preflight_destinations(destinations)
+    destinations.each do |destination|
+      FileUtils.mkdir_p(destination.dirname)
+      unless destination.dirname.directory? && destination.dirname.writable?
+        raise ReleaseUpdateError, "destination directory is not writable: #{destination.relative_path_from(ROOT)}"
+      end
+      if destination.symlink? || (destination.exist? && !destination.file?)
+        raise ReleaseUpdateError, "destination is not a regular file: #{destination.relative_path_from(ROOT)}"
+      end
+    end
+  rescue SystemCallError => error
+    raise ReleaseUpdateError, "cannot preflight destinations: #{error.message}"
+  end
+
+  def stage_destinations(rendered_destinations, entries)
+    rendered_destinations.each do |destination, contents|
+      next if destination.file? && destination.binread == contents
+
+      entry = {
+        destination: destination,
+        existed: destination.file?,
+        committed: false,
+      }
+      entries << entry
+      temporary_file = Tempfile.create([".update-release-stage-", ".tmp"], destination.dirname.to_s)
+      entry[:staged_path] = Pathname(temporary_file.path)
       temporary_file.binmode
       temporary_file.write(contents)
       temporary_file.flush
       temporary_file.fsync
       temporary_file.close
-      File.chmod(mode, temporary_file.path)
-      File.rename(temporary_file.path, destination)
+      mode = entry.fetch(:existed) ? destination.stat.mode & 0o777 : 0o644
+      File.chmod(mode, entry.fetch(:staged_path))
+    rescue SystemCallError => error
+      raise ReleaseUpdateError,
+            "cannot stage #{destination.relative_path_from(ROOT)}: #{error.message}"
+    end
+  end
+
+  def prepare_backups(entries)
+    entries.each do |entry|
+      next unless entry.fetch(:existed)
+
+      destination = entry.fetch(:destination)
+      backup_file = Tempfile.create([".update-release-backup-", ".tmp"], destination.dirname.to_s)
+      entry[:backup_path] = Pathname(backup_file.path)
+      backup_file.close
+      FileUtils.copy_file(destination, entry.fetch(:backup_path), true)
+    rescue SystemCallError => error
+      raise ReleaseUpdateError,
+            "cannot prepare backup for #{destination.relative_path_from(ROOT)}: #{error.message}"
+    end
+  end
+
+  def commit_staged_destinations(entries)
+    current_entry = nil
+    entries.each do |entry|
+      current_entry = entry
+      File.rename(entry.fetch(:staged_path), entry.fetch(:destination))
+      entry[:committed] = true
     end
   rescue SystemCallError => error
-    raise ReleaseUpdateError, "cannot atomically write #{destination.relative_path_from(ROOT)}: #{error.message}"
+    rollback_errors = rollback_destinations(entries)
+    destination = current_entry.fetch(:destination).relative_path_from(ROOT)
+    detail = rollback_errors.empty? ? "" : "; rollback failed: #{rollback_errors.join('; ')}"
+    raise ReleaseUpdateError, "transactional destination update failed at #{destination}: #{error.message}#{detail}"
+  end
+
+  def rollback_destinations(entries)
+    errors = []
+    entries.reverse_each do |entry|
+      next unless entry.fetch(:committed)
+
+      destination = entry.fetch(:destination)
+      if entry.fetch(:existed)
+        File.rename(entry.fetch(:backup_path), destination)
+      elsif destination.file?
+        File.unlink(destination)
+      end
+      entry[:committed] = false
+    rescue SystemCallError => error
+      errors << "#{destination.relative_path_from(ROOT)}: #{error.message}"
+    end
+    errors
+  end
+
+  def cleanup_transaction_files(entries)
+    entries.each do |entry|
+      [entry[:staged_path], entry[:backup_path]].compact.each do |path|
+        FileUtils.rm_f(path.to_s)
+      end
+    end
   end
 end
 
