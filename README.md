@@ -40,9 +40,9 @@ The updater is restricted to this exact repository/token/path allowlist:
 ## Release notification contract
 
 The update workflow accepts only the typed `homebrew_release`
-`repository_dispatch` event. Its `client_payload` contains exactly
-`repository` and `tag` (no version, package, URL, checksum, or branch supplied
-by the caller). For example:
+`repository_dispatch` event. It reads only `repository` and `tag` from
+`client_payload`; extra keys are ignored and are not trusted (no caller-supplied
+version, package, URL, checksum, or branch is used). For example:
 
 ```json
 {
@@ -61,14 +61,19 @@ release tag are accepted. The workflow downloads the public
 
 The updater reads the manifest from `TAP_MANIFEST_FILE` and:
 
-- validates the exact schema, repository/tag/version/commit, package set, and
-  canonical release-asset names;
+- validates the exact schema, repository/tag/version, lowercase 40-hex commit
+  metadata, package set, and canonical release-asset names;
 - reconstructs URLs for the allowlisted release assets or the allowlisted Git
   tag archive, fetches those public sources, and recalculates SHA-256;
 - refuses unknown repositories/packages, malformed or unsafe asset/path data,
   downgrades, and checksum mismatches; and
 - renders only the allowlisted definitions through a staged, backed-up,
   transactional replace, rolling back if a commit step fails.
+
+The manifest `commit` field is format-checked metadata only; the updater does
+not query GitHub to prove that it is the commit associated with the release
+tag. Repository/tag/version validation and the downloaded source checks are the
+authoritative updater checks.
 
 Identical rendered bytes are a no-op. Retrying the same release notification is
 therefore byte-identical and produces no package commit, push, or pull request
@@ -94,13 +99,15 @@ this repository. Before enabling release dispatches:
    private key as repository secret `TAP_GITHUB_APP_PRIVATE_KEY`. Never commit
    the key or any other credential.
 3. Enable **Allow auto-merge** in the repository settings.
-4. Protect `main` and require the exact status-check contexts `contracts` and
-   `homebrew`. If strict protection is used, require branches to be up to date
+4. Protect `main` with strict required status checks
+   (`required_status_checks.strict == true`) and require the exact contexts
+   `contracts` and `homebrew`; strict protection keeps branches up to date
    before merging.
 
-The update workflow performs a fail-closed preflight for auto-merge and both
-required contexts before checkout, branch mutation, or publishing. Missing
-configuration intentionally fails the run before any mutation.
+The update workflow performs a fail-closed preflight for auto-merge, strict
+up-to-date enforcement, and both required contexts before checkout, branch
+mutation, or publishing. Missing or non-strict configuration intentionally
+fails the run before any mutation.
 
 ## Pull-request CI
 
@@ -115,29 +122,30 @@ Do not bypass these checks or merge an unverified package definition.
 
 ## Recovery and retries
 
-For a failed update, fix the deterministic PR/check or the live configuration,
-then rerun the same release notification for the authoritative source release.
-Do not blind-force a branch, hand-edit checksums, or manually manufacture a tap
-version. If the source artifact or manifest is wrong, correct the source
-GitHub Release and notify the tap again; public release/tag history is not
-rewritten by this workflow.
+For a pre-publication draft or artifact problem, repair the draft/source
+artifact before it is published or consumed. For an already public or consumed
+release, never edit or replace its bytes, checksum, or tag; publish a correction
+under a new version/tag instead. For an unchanged public source release, fix
+the deterministic PR/check or live configuration and rerun only that same
+release notification. Do not blind-force a branch, hand-edit checksums, or
+manually manufacture a tap version. The source app GitHub Release remains
+authoritative.
 
 ## Local verification
 
 Run these commands from the tap checkout:
 
 ```sh
-rtk test ruby test/update-release-test.rb
-rtk test bash test/test-changed-packages-test.sh
-rtk proxy bash -n scripts/test-changed-packages.sh test/test-changed-packages-test.sh
-rtk proxy ruby -rpsych -e 'Psych.load_file(".github/workflows/ci.yml"); Psych.load_file(".github/workflows/update-package.yml")'
-rtk proxy ruby -c scripts/update-release.rb
-rtk proxy ruby -c test/update-release-test.rb
-rtk git diff --check
+ruby test/update-release-test.rb
+bash test/test-changed-packages-test.sh
+bash -n scripts/test-changed-packages.sh test/test-changed-packages-test.sh
+ruby -rpsych -e 'Psych.load_file(".github/workflows/ci.yml"); Psych.load_file(".github/workflows/update-package.yml")'
+ruby -c scripts/update-release.rb
+ruby -c test/update-release-test.rb
+git diff --check
 ```
 
-The Ruby suite normally reports 65 runs and 657 assertions (or the current
-pass count if tests evolve). Tests use temporary repositories, fixtures, and
-fake download/Homebrew tools; they do not mutate live GitHub settings,
-releases, branches, PRs, or local Homebrew installations. Credentials are not
-needed for local verification.
+All tests must pass. The suites use temporary repositories, fixtures, and fake
+download/Homebrew tools; they do not mutate live GitHub settings, releases,
+branches, PRs, or local Homebrew installations. Credentials are not needed for
+local verification.
