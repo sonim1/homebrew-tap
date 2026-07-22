@@ -1,0 +1,30 @@
+# frozen_string_literal: true
+
+cask "<%= token %>" do
+  version "<%= version %>"
+  sha256 "<%= sha256 %>"
+
+  url "<%= url %>"
+  name "UpdateBar"
+  desc "Menu bar update tracker for local tools"
+  homepage "https://github.com/sonim1/UpdateBar"
+
+  depends_on arch: :arm64
+  depends_on macos: :ventura
+
+  app "UpdateBar.app"
+
+  zap trash: [
+    "~/.updatebar",
+    "~/Library/Logs/UpdateBar",
+    "~/Library/Preferences/com.sonim1.UpdateBar.plist",
+  ]
+
+  caveats <<~EOS
+    For the updatebar CLI, install the formula:
+      brew install sonim1/tap/updatebar
+
+    For the Open TUI menu item, install the terminal UI:
+      brew install sonim1/tap/updatebar-tui
+  EOS
+end
