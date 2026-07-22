@@ -438,16 +438,16 @@ class UpdateReleaseTest < Minitest::Test
     }, workflow.fetch("concurrency"))
   end
 
-  def test_update_workflow_has_one_bounded_update_job_with_exact_write_permissions
+  def test_update_workflow_has_one_bounded_update_job_with_read_only_default_token
     jobs = update_workflow.fetch("jobs")
     assert_equal ["update"], jobs.keys
 
     job = jobs.fetch("update")
     assert_equal "ubuntu-latest", job.fetch("runs-on")
     assert_equal 15, job.fetch("timeout-minutes")
-    assert_equal({ "contents" => "write", "pull-requests" => "write" }, job.fetch("permissions"))
+    assert_equal({ "contents" => "read" }, job.fetch("permissions"))
     refute job.key?("secrets")
-    assert_equal %w[validate download-manifest app-token checkout prepare-branch update-packages publish-pr],
+    assert_equal %w[validate download-manifest app-token preflight checkout prepare-branch update-packages publish-pr],
                  job.fetch("steps").map { |step| step.fetch("id") }
   end
 
@@ -459,6 +459,9 @@ class UpdateReleaseTest < Minitest::Test
       "private-key" => "${{ secrets.TAP_GITHUB_APP_PRIVATE_KEY }}",
       "owner" => "sonim1",
       "repositories" => "homebrew-tap",
+      "permission-administration" => "read",
+      "permission-contents" => "write",
+      "permission-pull-requests" => "write",
     }, app_token.fetch("with"))
 
     checkout = update_step("checkout")
@@ -466,7 +469,83 @@ class UpdateReleaseTest < Minitest::Test
     assert_equal({
       "token" => "${{ steps.app-token.outputs.token }}",
       "fetch-depth" => 0,
+      "persist-credentials" => false,
     }, checkout.fetch("with"))
+  end
+
+  def test_update_workflow_separates_read_and_app_tokens
+    steps = update_workflow.fetch("jobs").fetch("update").fetch("steps")
+    app_token = "${{ steps.app-token.outputs.token }}"
+    read_token = "${{ github.token }}"
+
+    assert_equal %w[preflight publish-pr],
+                 steps.select { |step| step.dig("env", "GH_TOKEN") == app_token }.map { |step| step.fetch("id") }
+    assert_equal %w[download-manifest update-packages],
+                 steps.select { |step| step.dig("env", "GH_TOKEN") == read_token }.map { |step| step.fetch("id") }
+    refute_match(/https?:\/\/[^\s]*\$\{\{\s*steps\.app-token\.outputs\.token/, UPDATE_WORKFLOW.read)
+    refute_match(/base64|http\.extraheader/i, UPDATE_WORKFLOW.read)
+  end
+
+  def test_update_workflow_preflight_fails_closed_on_repository_and_protection_settings
+    step = update_step("preflight")
+    assert_equal({ "GH_TOKEN" => "${{ steps.app-token.outputs.token }}" }, step.fetch("env"))
+
+    script = step.fetch("run")
+    assert_shell_strict(script)
+    assert_includes script, "gh api repos/sonim1/homebrew-tap"
+    assert_includes script, ".allow_auto_merge == true"
+    assert_includes script, "repos/sonim1/homebrew-tap/branches/main/protection/required_status_checks"
+    assert_includes script, '["contracts", "homebrew"]'
+    assert_includes script, ".contexts"
+    assert_includes script, ".checks"
+    assert_includes script, "jq -e"
+
+    step_ids = update_workflow.fetch("jobs").fetch("update").fetch("steps").map { |candidate| candidate.fetch("id") }
+    assert_operator step_ids.index("preflight"), :<, step_ids.index("prepare-branch")
+    assert_operator step_ids.index("preflight"), :<, step_ids.index("publish-pr")
+  end
+
+  def test_preflight_accepts_exact_required_contexts_from_both_api_schemas
+    %w[contexts checks].each do |schema|
+      clear_workflow_tool_state
+      result = run_workflow_step("preflight", environment: { "FAKE_PROTECTION_SCHEMA" => schema })
+
+      assert result.fetch(:status).success?, "#{schema}: #{result.fetch(:stderr)}"
+    end
+  end
+
+  def test_preflight_failure_stops_the_sequence_before_any_branch_push
+    repository = create_workflow_repository
+    result = run_workflow_sequence(
+      %w[preflight publish-pr],
+      directory: repository.fetch(:worktree),
+      environment: workflow_publish_environment.merge("FAKE_PROTECTION_SCHEMA" => "missing-homebrew"),
+    )
+
+    assert_equal ["preflight"], result.fetch(:steps)
+    refute result.fetch(:status).success?
+    assert_equal 2, remote_branch_status(repository.fetch(:remote), "release/switchtab-1.2.3")
+    assert_equal %w[api api], workflow_tool_calls.map { |call| call.fetch("argv").first }
+  end
+
+  def test_preflight_propagates_repository_api_failures
+    [
+      { "FAKE_AUTO_MERGE" => "api-error" },
+      { "FAKE_PROTECTION_SCHEMA" => "api-error" },
+    ].each do |environment|
+      clear_workflow_tool_state
+      result = run_workflow_step("preflight", environment: environment)
+
+      refute result.fetch(:status).success?
+      assert_equal 22, result.fetch(:status).exitstatus
+    end
+  end
+
+  def test_preflight_rejects_disabled_auto_merge
+    result = run_workflow_step("preflight", environment: { "FAKE_AUTO_MERGE" => "false" })
+
+    refute result.fetch(:status).success?
+    assert_includes result.fetch(:stderr), "Repository auto-merge must be enabled"
   end
 
   def test_update_workflow_validates_inert_payload_values_and_derives_both_products
@@ -496,6 +575,9 @@ class UpdateReleaseTest < Minitest::Test
     assert_shell_strict(prepare)
     assert_includes prepare, "git fetch --no-tags origin main:refs/remotes/origin/main"
     assert_includes prepare, 'git ls-remote --exit-code --heads origin "refs/heads/$RELEASE_BRANCH"'
+    assert_includes prepare, 'case "$LS_REMOTE_STATUS" in'
+    assert_match(/2\).*?REMOTE_BRANCH_SHA=""/m, prepare)
+    assert_includes prepare, 'exit "$LS_REMOTE_STATUS"'
     assert_includes prepare,
                     'git fetch --no-tags origin "refs/heads/$RELEASE_BRANCH:refs/remotes/origin/$RELEASE_BRANCH"'
     assert_includes prepare, 'REMOTE_BRANCH_SHA="$(git rev-parse "refs/remotes/origin/$RELEASE_BRANCH")"'
@@ -505,6 +587,40 @@ class UpdateReleaseTest < Minitest::Test
     assert_operator step_ids.index("validate"), :<, step_ids.index("prepare-branch")
     assert_operator step_ids.index("download-manifest"), :<, step_ids.index("prepare-branch")
     assert_operator step_ids.index("prepare-branch"), :<, step_ids.index("update-packages")
+  end
+
+  def test_prepare_branch_propagates_ls_remote_auth_or_network_failures
+    repository = create_workflow_repository
+    fake_git_bin = write_failing_ls_remote_git
+
+    result = run_workflow_step(
+      "prepare-branch",
+      directory: repository.fetch(:worktree),
+      environment: workflow_publish_environment.merge(
+        "PATH" => "#{fake_git_bin}:#{workflow_environment.fetch('PATH')}",
+        "FAKE_LS_REMOTE_STATUS" => "73",
+        "REAL_GIT" => git_executable,
+      ),
+    )
+
+    refute result.fetch(:status).success?
+    assert_equal 73, result.fetch(:status).exitstatus
+    assert_equal "main", git_success!(repository.fetch(:worktree), "branch", "--show-current")
+  end
+
+  def test_prepare_branch_treats_ls_remote_status_two_as_absent
+    repository = create_workflow_repository
+
+    result = run_workflow_step(
+      "prepare-branch",
+      directory: repository.fetch(:worktree),
+      environment: workflow_publish_environment,
+    )
+
+    assert result.fetch(:status).success?, result.fetch(:stderr)
+    assert_equal "release/switchtab-1.2.3",
+                 git_success!(repository.fetch(:worktree), "branch", "--show-current")
+    assert_includes @tap.join("workflow-github-env").read, "REMOTE_BRANCH_SHA=\n"
   end
 
   def test_update_workflow_downloads_only_the_exact_manifest_with_the_read_token
@@ -543,14 +659,23 @@ class UpdateReleaseTest < Minitest::Test
 
     script = step.fetch("run")
     assert_shell_strict(script)
-    assert_includes script, "git diff --name-only -- . ':(exclude)Formula/**' ':(exclude)Casks/**'"
-    assert_includes script, "git add -- Formula/ Casks/"
-    assert_includes script, "git diff --cached --quiet"
+    assert_match(/switchtab\).*?package_files=\("Casks\/switchtab\.rb"\)/m, script)
+    assert_match(
+      /updatebar\).*?package_files=\("Formula\/updatebar\.rb" "Formula\/updatebar-tui\.rb" "Casks\/updatebar-app\.rb"\)/m,
+      script,
+    )
+    assert_includes script, "git diff --name-only -z HEAD --"
+    assert_includes script, "git ls-files --others --exclude-standard -z -- Formula/ Casks/"
+    assert_includes script, 'git add -- "${package_files[@]}"'
+    assert_includes script, "git diff --cached --name-only -z --"
+    refute_includes script, "git add -- Formula/ Casks/"
     assert_includes script, "No package changes; nothing to publish."
-    assert_includes script, "git diff --cached --name-only -- . ':(exclude)Formula/**' ':(exclude)Casks/**'"
     assert_includes script, 'git config user.name "homebrew-release-bot[bot]"'
     assert_includes script, 'git config user.email "homebrew-release-bot[bot]@users.noreply.github.com"'
     assert_includes script, 'git commit -m "chore(${PRODUCT}): update to ${VERSION}"'
+    assert_includes script, "trap cleanup_git_credentials EXIT"
+    assert_includes script, "git config --local credential.helper '!gh auth git-credential'"
+    assert_includes script, "git config --local --unset-all credential.helper"
     assert_includes script, 'git push --force-with-lease="$LEASE" origin "HEAD:refs/heads/${RELEASE_BRANCH}"'
     refute_match(/git push[^\n]*--force(?:\s|$)/, script)
     assert_includes script, "gh api --method GET repos/sonim1/homebrew-tap/pulls"
@@ -558,7 +683,165 @@ class UpdateReleaseTest < Minitest::Test
     refute_includes script, "gh pr list"
     assert_includes script,
                     'gh pr create --repo sonim1/homebrew-tap --base main --head "$RELEASE_BRANCH"'
-    assert_includes script, 'gh pr merge "$PR_NUMBER" --repo sonim1/homebrew-tap --auto --squash'
+    assert_includes script, 'CREATE_STATUS=$?'
+    assert_operator script.scan("gh api --method GET repos/sonim1/homebrew-tap/pulls").length, :>=, 1
+    assert_includes script, 'HEAD_COMMIT="$(git rev-parse HEAD)"'
+    assert_includes script,
+                    'gh pr merge "$PR_NUMBER" --repo sonim1/homebrew-tap --auto --squash --match-head-commit "$HEAD_COMMIT"'
+  end
+
+  def test_publish_rejects_an_unexpected_untracked_package_path_nul_safely
+    repository = create_workflow_repository
+    worktree = repository.fetch(:worktree)
+    git_success!(worktree, "checkout", "-b", "release/switchtab-1.2.3")
+    worktree.join("Casks/switchtab.rb").write("switchtab v2\n")
+    worktree.join("Casks/unexpected\nname.rb").write("unexpected\n")
+
+    result = run_workflow_step(
+      "publish-pr",
+      directory: worktree,
+      environment: workflow_publish_environment,
+    )
+
+    refute result.fetch(:status).success?
+    assert_equal 2, remote_branch_status(repository.fetch(:remote), "release/switchtab-1.2.3")
+    assert_empty workflow_tool_calls
+  end
+
+  def test_publish_rejects_a_tracked_package_outside_the_selected_product_allowlist
+    repository = create_workflow_repository
+    worktree = repository.fetch(:worktree)
+    git_success!(worktree, "checkout", "-b", "release/switchtab-1.2.3")
+    worktree.join("Casks/switchtab.rb").write("switchtab v2\n")
+    worktree.join("Formula/updatebar.rb").write("unexpected updatebar change\n")
+
+    result = run_workflow_step(
+      "publish-pr",
+      directory: worktree,
+      environment: workflow_publish_environment,
+    )
+
+    refute result.fetch(:status).success?
+    assert_equal 2, remote_branch_status(repository.fetch(:remote), "release/switchtab-1.2.3")
+    assert_empty workflow_tool_calls
+  end
+
+  def test_publish_no_diff_exits_without_push_or_pull_request
+    repository = create_workflow_repository
+    worktree = repository.fetch(:worktree)
+    git_success!(worktree, "checkout", "-b", "release/switchtab-1.2.3")
+    original_head = git_success!(worktree, "rev-parse", "HEAD")
+
+    result = run_workflow_step(
+      "publish-pr",
+      directory: worktree,
+      environment: workflow_publish_environment,
+    )
+
+    assert result.fetch(:status).success?, result.fetch(:stderr)
+    assert_includes result.fetch(:stdout), "No package changes; nothing to publish."
+    assert_equal original_head, git_success!(worktree, "rev-parse", "HEAD")
+    assert_equal 2, remote_branch_status(repository.fetch(:remote), "release/switchtab-1.2.3")
+    assert_empty workflow_tool_calls
+    assert_no_local_credential_helper(worktree)
+  end
+
+  def test_publish_creates_an_absent_branch_with_a_lease_and_locks_merge_to_head
+    repository = create_workflow_repository
+    worktree = repository.fetch(:worktree)
+    git_success!(worktree, "checkout", "-b", "release/switchtab-1.2.3")
+    worktree.join("Casks/switchtab.rb").write("switchtab v2\n")
+
+    result = run_workflow_step(
+      "publish-pr",
+      directory: worktree,
+      environment: workflow_publish_environment,
+    )
+
+    assert result.fetch(:status).success?, result.fetch(:stderr)
+    head = git_success!(worktree, "rev-parse", "HEAD")
+    assert_equal head, remote_branch_sha(repository.fetch(:remote), "release/switchtab-1.2.3")
+    merge = workflow_tool_calls.find { |call| call.fetch("argv").first(2) == %w[pr merge] }
+    refute_nil merge
+    assert_equal head, argument_after(merge.fetch("argv"), "--match-head-commit")
+    assert workflow_tool_calls.all? { |call| call.fetch("token_present") }
+    assert_no_local_credential_helper(worktree)
+  end
+
+  def test_publish_replaces_an_existing_branch_with_its_captured_lease
+    repository = create_workflow_repository
+    worktree = repository.fetch(:worktree)
+    branch = "release/switchtab-1.2.3"
+    git_success!(worktree, "checkout", "-b", branch)
+    worktree.join("Casks/switchtab.rb").write("old release branch\n")
+    git_success!(worktree, "add", "--", "Casks/switchtab.rb")
+    git_success!(worktree, "commit", "-m", "old release")
+    git_success!(worktree, "push", "origin", branch)
+    old_remote_sha = remote_branch_sha(repository.fetch(:remote), branch)
+    git_success!(worktree, "checkout", "main")
+    git_success!(worktree, "checkout", "-B", branch, "main")
+    worktree.join("Casks/switchtab.rb").write("new release branch\n")
+
+    result = run_workflow_step(
+      "publish-pr",
+      directory: worktree,
+      environment: workflow_publish_environment.merge("REMOTE_BRANCH_SHA" => old_remote_sha),
+    )
+
+    assert result.fetch(:status).success?, result.fetch(:stderr)
+    new_head = git_success!(worktree, "rev-parse", "HEAD")
+    refute_equal old_remote_sha, new_head
+    assert_equal new_head, remote_branch_sha(repository.fetch(:remote), branch)
+    assert_no_local_credential_helper(worktree)
+  end
+
+  def test_publish_recovers_when_parallel_pr_creation_wins_the_race
+    repository = create_workflow_repository
+    worktree = repository.fetch(:worktree)
+    git_success!(worktree, "checkout", "-b", "release/switchtab-1.2.3")
+    worktree.join("Casks/switchtab.rb").write("switchtab v2\n")
+
+    result = run_workflow_step(
+      "publish-pr",
+      directory: worktree,
+      environment: workflow_publish_environment.merge(
+        "FAKE_PR_RESPONSES" => "[null,77]",
+        "FAKE_PR_CREATE_STATUS" => "19",
+      ),
+    )
+
+    assert result.fetch(:status).success?, result.fetch(:stderr)
+    calls = workflow_tool_calls.map { |call| call.fetch("argv") }
+    assert_equal %w[api pr api pr], calls.map(&:first)
+    assert_equal ["create", "merge"], calls.select { |argv| argv.first == "pr" }.map { |argv| argv.fetch(1) }
+    calls.select { |argv| argv.first == "api" }.each do |argv|
+      assert_includes argv, "head=sonim1:release/switchtab-1.2.3"
+    end
+    merge = calls.last
+    assert_equal "77", merge.fetch(2)
+    assert_equal git_success!(worktree, "rev-parse", "HEAD"), argument_after(merge, "--match-head-commit")
+    assert_no_local_credential_helper(worktree)
+  end
+
+  def test_publish_propagates_pr_create_failure_when_exact_head_still_has_no_pr
+    repository = create_workflow_repository
+    worktree = repository.fetch(:worktree)
+    git_success!(worktree, "checkout", "-b", "release/switchtab-1.2.3")
+    worktree.join("Casks/switchtab.rb").write("switchtab v2\n")
+
+    result = run_workflow_step(
+      "publish-pr",
+      directory: worktree,
+      environment: workflow_publish_environment.merge(
+        "FAKE_PR_RESPONSES" => "[null, null]",
+        "FAKE_PR_CREATE_STATUS" => "19",
+      ),
+    )
+
+    refute result.fetch(:status).success?
+    assert_equal 19, result.fetch(:status).exitstatus
+    refute workflow_tool_calls.any? { |call| call.fetch("argv").first(2) == %w[pr merge] }
+    assert_no_local_credential_helper(worktree)
   end
 
   def test_update_workflow_pins_actions_and_has_no_payload_execution_or_destructive_rollback
@@ -604,6 +887,233 @@ class UpdateReleaseTest < Minitest::Test
 
   def assert_shell_strict(script)
     assert_equal "set -euo pipefail", script.lines.first&.strip
+  end
+
+  def run_workflow_step(id, directory: @tap, environment: {})
+    stdout, stderr, status = Open3.capture3(
+      workflow_environment.merge(environment),
+      "bash", "-c", update_step(id).fetch("run"),
+      chdir: directory.to_s,
+    )
+    { stdout: stdout, stderr: stderr, status: status }
+  end
+
+  def run_workflow_sequence(ids, directory: @tap, environment: {})
+    executed = []
+    result = nil
+    ids.each do |id|
+      executed << id
+      result = run_workflow_step(id, directory: directory, environment: environment)
+      break unless result.fetch(:status).success?
+    end
+    result.merge(steps: executed)
+  end
+
+  def workflow_environment
+    write_workflow_fake_gh
+    {
+      "PATH" => "#{@workflow_bin}:#{ENV.fetch('PATH')}",
+      "GH_TOKEN" => "test-app-token",
+      "GITHUB_ENV" => @tap.join("workflow-github-env").to_s,
+      "GITHUB_OUTPUT" => @tap.join("workflow-github-output").to_s,
+      "FAKE_GH_LOG" => @workflow_gh_log.to_s,
+      "FAKE_GH_STATE" => @workflow_gh_state.to_s,
+      "FAKE_AUTO_MERGE" => "true",
+      "FAKE_PROTECTION_SCHEMA" => "contexts",
+      "FAKE_PR_RESPONSES" => "[42]",
+      "FAKE_PR_CREATE_STATUS" => "0",
+      "FAKE_PR_NUMBER" => "42",
+    }
+  end
+
+  def workflow_publish_environment
+    {
+      "PRODUCT" => "switchtab",
+      "VERSION" => "1.2.3",
+      "RELEASE_TAG" => "v1.2.3",
+      "RELEASE_BRANCH" => "release/switchtab-1.2.3",
+      "SOURCE_REPOSITORY" => "sonim1/switchtab",
+      "REMOTE_BRANCH_SHA" => "",
+    }
+  end
+
+  def clear_workflow_tool_state
+    [@workflow_gh_log, @workflow_gh_state].compact.each { |path| FileUtils.rm_f(path) }
+  end
+
+  def workflow_tool_calls
+    return [] unless @workflow_gh_log&.file?
+
+    @workflow_gh_log.readlines(chomp: true).map { |line| JSON.parse(line) }
+  end
+
+  def write_workflow_fake_gh
+    return if @workflow_bin
+
+    @workflow_bin = @tap.join("workflow-bin")
+    @workflow_gh_log = @tap.join("workflow-gh-calls.jsonl")
+    @workflow_gh_state = @tap.join("workflow-gh-state")
+    FileUtils.mkdir_p(@workflow_bin)
+    gh = @workflow_bin.join("gh")
+    gh.write(<<~'RUBY')
+      #!/usr/bin/env ruby
+      require "json"
+
+      log_path = ENV.fetch("FAKE_GH_LOG")
+      File.open(log_path, "a") do |log|
+        log.puts(JSON.generate("argv" => ARGV, "token_present" => !ENV["GH_TOKEN"].to_s.empty?))
+      end
+
+      endpoint = ARGV.find { |argument| argument.start_with?("repos/") }
+      if ARGV.first == "api" && endpoint == "repos/sonim1/homebrew-tap"
+        exit 22 if ENV.fetch("FAKE_AUTO_MERGE", "true") == "api-error"
+
+        puts JSON.generate(
+          "id" => 1,
+          "full_name" => "sonim1/homebrew-tap",
+          "allow_auto_merge" => ENV.fetch("FAKE_AUTO_MERGE", "true") == "true",
+        )
+      elsif ARGV.first == "api" &&
+            endpoint == "repos/sonim1/homebrew-tap/branches/main/protection/required_status_checks"
+        schema = ENV.fetch("FAKE_PROTECTION_SCHEMA", "contexts")
+        exit 22 if schema == "api-error"
+
+        response = case schema
+                   when "contexts"
+                     { "strict" => true, "contexts" => %w[contracts homebrew], "checks" => [] }
+                   when "checks"
+                     {
+                       "strict" => true,
+                       "contexts" => [],
+                       "checks" => [
+                         { "context" => "contracts", "app_id" => 1 },
+                         { "context" => "homebrew", "app_id" => 1 },
+                       ],
+                     }
+                   when "missing-homebrew"
+                     { "strict" => true, "contexts" => ["contracts"], "checks" => [] }
+                   else
+                     { "strict" => true, "contexts" => nil, "checks" => nil }
+                   end
+        puts JSON.generate(response)
+      elsif ARGV.first == "api" && endpoint == "repos/sonim1/homebrew-tap/pulls"
+        state_path = ENV.fetch("FAKE_GH_STATE")
+        call_index = File.file?(state_path) ? File.read(state_path).to_i : 0
+        responses = JSON.parse(ENV.fetch("FAKE_PR_RESPONSES", "[42]"))
+        response = responses.fetch([call_index, responses.length - 1].min)
+        File.write(state_path, (call_index + 1).to_s)
+        puts response unless response.nil?
+      elsif ARGV.first(2) == %w[pr create]
+        status = ENV.fetch("FAKE_PR_CREATE_STATUS", "0").to_i
+        if status.zero?
+          puts "https://github.com/sonim1/homebrew-tap/pull/#{ENV.fetch('FAKE_PR_NUMBER', '42')}"
+        else
+          warn "simulated pull request creation race"
+          exit status
+        end
+      elsif ARGV.first(2) == %w[pr view]
+        puts ENV.fetch("FAKE_PR_NUMBER", "42")
+      elsif ARGV.first(2) == %w[pr merge]
+        puts "merge queued"
+      elsif ARGV.first(2) == %w[auth git-credential]
+        STDIN.read
+        puts "username=x-access-token"
+        puts "password=#{ENV.fetch('GH_TOKEN')}"
+      else
+        warn "unexpected fake gh invocation: #{ARGV.inspect}"
+        exit 97
+      end
+    RUBY
+    FileUtils.chmod(0o755, gh)
+  end
+
+  def create_workflow_repository
+    remote = @tap.join("workflow-remote.git")
+    worktree = @tap.join("workflow-worktree")
+    git_success!(nil, "init", "--bare", remote.to_s)
+    git_success!(nil, "init", "-b", "main", worktree.to_s)
+    git_success!(worktree, "config", "user.name", "Workflow Test")
+    git_success!(worktree, "config", "user.email", "workflow-test@example.invalid")
+    {
+      "Casks/switchtab.rb" => "switchtab v1\n",
+      "Casks/updatebar-app.rb" => "updatebar app v1\n",
+      "Formula/updatebar.rb" => "updatebar v1\n",
+      "Formula/updatebar-tui.rb" => "updatebar tui v1\n",
+    }.each do |relative_path, contents|
+      path = worktree.join(relative_path)
+      FileUtils.mkdir_p(path.dirname)
+      path.write(contents)
+    end
+    git_success!(worktree, "add", "--", "Casks", "Formula")
+    git_success!(worktree, "commit", "-m", "initial packages")
+    git_success!(worktree, "remote", "add", "origin", remote.to_s)
+    git_success!(worktree, "push", "-u", "origin", "main")
+    { worktree: worktree, remote: remote }
+  end
+
+  def git_success!(directory, *arguments, environment: {})
+    stdout, stderr, status = if directory
+                               Open3.capture3(environment, "git", *arguments, chdir: directory.to_s)
+                             else
+                               Open3.capture3(environment, "git", *arguments)
+                             end
+    return stdout.strip if status.success?
+
+    raise "git #{arguments.join(' ')} failed (#{status.exitstatus}): #{stderr}"
+  end
+
+  def remote_branch_status(remote, branch)
+    _stdout, _stderr, status = Open3.capture3(
+      "git", "ls-remote", "--exit-code", "--heads", remote.to_s, "refs/heads/#{branch}"
+    )
+    status.exitstatus
+  end
+
+  def remote_branch_sha(remote, branch)
+    output, stderr, status = Open3.capture3(
+      "git", "ls-remote", "--exit-code", "--heads", remote.to_s, "refs/heads/#{branch}"
+    )
+    raise "cannot resolve remote branch #{branch}: #{stderr}" unless status.success?
+
+    output.split.first
+  end
+
+  def argument_after(arguments, flag)
+    position = arguments.index(flag)
+    position && arguments.fetch(position + 1)
+  end
+
+  def assert_no_local_credential_helper(worktree)
+    stdout, _stderr, status = Open3.capture3(
+      "git", "config", "--local", "--get-all", "credential.helper", chdir: worktree.to_s
+    )
+    refute status.success?, "credential helper remained configured: #{stdout}"
+    assert_empty stdout
+  end
+
+  def write_failing_ls_remote_git
+    directory = @tap.join("failing-git-bin")
+    FileUtils.mkdir_p(directory)
+    wrapper = directory.join("git")
+    wrapper.write(<<~'RUBY')
+      #!/usr/bin/env ruby
+      if ARGV.first == "ls-remote"
+        exit Integer(ENV.fetch("FAKE_LS_REMOTE_STATUS"))
+      end
+
+      exec ENV.fetch("REAL_GIT"), *ARGV
+    RUBY
+    FileUtils.chmod(0o755, wrapper)
+    directory
+  end
+
+  def git_executable
+    @git_executable ||= begin
+      path, status = Open3.capture2("which", "git")
+      raise "git executable not found" unless status.success?
+
+      path.strip
+    end
   end
 
   def normalize_ci_step(job_name, step)

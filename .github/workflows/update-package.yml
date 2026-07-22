@@ -16,8 +16,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
-      contents: write
-      pull-requests: write
+      contents: read
     steps:
       - name: Validate release payload
         id: validate
@@ -105,6 +104,42 @@ jobs:
           private-key: ${{ secrets.TAP_GITHUB_APP_PRIVATE_KEY }}
           owner: sonim1
           repositories: homebrew-tap
+          permission-administration: read
+          permission-contents: write
+          permission-pull-requests: write
+
+      - name: Verify auto-merge protection
+        id: preflight
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+
+          REPOSITORY_SETTINGS="$(gh api repos/sonim1/homebrew-tap)"
+          if ! jq -e '.allow_auto_merge == true' <<< "$REPOSITORY_SETTINGS" >/dev/null; then
+            printf 'Repository auto-merge must be enabled before release automation can publish\n' >&2
+            exit 1
+          fi
+
+          REQUIRED_STATUS_CHECKS="$(gh api repos/sonim1/homebrew-tap/branches/main/protection/required_status_checks)"
+          if ! jq -e '
+            if type != "object" then
+              false
+            else
+              (
+                (if (.contexts | type) == "array" then
+                   [.contexts[] | select(type == "string")]
+                 else [] end) +
+                (if (.checks | type) == "array" then
+                   [.checks[] | select(type == "object") | .context | select(type == "string")]
+                 else [] end)
+              ) as $contexts
+              | (["contracts", "homebrew"] - $contexts | length == 0)
+            end
+          ' <<< "$REQUIRED_STATUS_CHECKS" >/dev/null; then
+            printf 'Branch protection must require exact contracts and homebrew status contexts\n' >&2
+            exit 1
+          fi
 
       - name: Check out tap
         id: checkout
@@ -112,6 +147,7 @@ jobs:
         with:
           token: ${{ steps.app-token.outputs.token }}
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Prepare deterministic release branch
         id: prepare-branch
@@ -121,10 +157,23 @@ jobs:
           git fetch --no-tags origin main:refs/remotes/origin/main
 
           REMOTE_BRANCH_SHA=""
-          if git ls-remote --exit-code --heads origin "refs/heads/$RELEASE_BRANCH" >/dev/null 2>&1; then
-            git fetch --no-tags origin "refs/heads/$RELEASE_BRANCH:refs/remotes/origin/$RELEASE_BRANCH"
-            REMOTE_BRANCH_SHA="$(git rev-parse "refs/remotes/origin/$RELEASE_BRANCH")"
-          fi
+          set +e
+          git ls-remote --exit-code --heads origin "refs/heads/$RELEASE_BRANCH" >/dev/null 2>&1
+          LS_REMOTE_STATUS=$?
+          set -e
+          case "$LS_REMOTE_STATUS" in
+            0)
+              git fetch --no-tags origin "refs/heads/$RELEASE_BRANCH:refs/remotes/origin/$RELEASE_BRANCH"
+              REMOTE_BRANCH_SHA="$(git rev-parse "refs/remotes/origin/$RELEASE_BRANCH")"
+              ;;
+            2)
+              REMOTE_BRANCH_SHA=""
+              ;;
+            *)
+              printf 'Could not inspect remote release branch (git exit %s)\n' "$LS_REMOTE_STATUS" >&2
+              exit "$LS_REMOTE_STATUS"
+              ;;
+          esac
 
           git checkout -B "$RELEASE_BRANCH" origin/main
 
@@ -147,37 +196,102 @@ jobs:
         run: |
           set -euo pipefail
 
-          UNEXPECTED_TRACKED="$(git diff --name-only -- . ':(exclude)Formula/**' ':(exclude)Casks/**')"
-          if [[ -n "$UNEXPECTED_TRACKED" ]]; then
-            printf 'Updater changed unexpected tracked paths:\n%s\n' "$UNEXPECTED_TRACKED" >&2
-            exit 1
-          fi
+          case "$PRODUCT" in
+            switchtab)
+              package_files=("Casks/switchtab.rb")
+              ;;
+            updatebar)
+              package_files=("Formula/updatebar.rb" "Formula/updatebar-tui.rb" "Casks/updatebar-app.rb")
+              ;;
+            *)
+              printf 'Unsupported validated product: %s\n' "$PRODUCT" >&2
+              exit 1
+              ;;
+          esac
 
-          git add -- Formula/ Casks/
-          if git diff --cached --quiet; then
+          path_is_allowed() {
+            local candidate="$1"
+            local allowed_path
+            for allowed_path in "${package_files[@]}"; do
+              [[ "$candidate" == "$allowed_path" ]] && return 0
+            done
+            return 1
+          }
+
+          tracked_paths=()
+          while IFS= read -r -d '' path; do
+            tracked_paths+=("$path")
+          done < <(git diff --name-only -z HEAD --)
+
+          untracked_package_paths=()
+          while IFS= read -r -d '' path; do
+            untracked_package_paths+=("$path")
+          done < <(git ls-files --others --exclude-standard -z -- Formula/ Casks/)
+
+          for path in "${tracked_paths[@]+"${tracked_paths[@]}"}" \
+                      "${untracked_package_paths[@]+"${untracked_package_paths[@]}"}"; do
+            if ! path_is_allowed "$path"; then
+              printf 'Updater changed an unexpected path: %q\n' "$path" >&2
+              exit 1
+            fi
+          done
+
+          if (( ${#tracked_paths[@]} == 0 && ${#untracked_package_paths[@]} == 0 )); then
             printf 'No package changes; nothing to publish.\n'
             exit 0
           fi
 
-          UNEXPECTED_STAGED="$(git diff --cached --name-only -- . ':(exclude)Formula/**' ':(exclude)Casks/**')"
-          if [[ -n "$UNEXPECTED_STAGED" ]]; then
-            printf 'Unexpected paths were staged:\n%s\n' "$UNEXPECTED_STAGED" >&2
-            exit 1
+          git add -- "${package_files[@]}"
+
+          staged_paths=()
+          while IFS= read -r -d '' path; do
+            staged_paths+=("$path")
+          done < <(git diff --cached --name-only -z --)
+          if (( ${#staged_paths[@]} == 0 )); then
+            printf 'No package changes; nothing to publish.\n'
+            exit 0
           fi
+          for path in "${staged_paths[@]+"${staged_paths[@]}"}"; do
+            if ! path_is_allowed "$path"; then
+              printf 'Unexpected path was staged: %q\n' "$path" >&2
+              exit 1
+            fi
+          done
 
           git config user.name "homebrew-release-bot[bot]"
           git config user.email "homebrew-release-bot[bot]@users.noreply.github.com"
           git commit -m "chore(${PRODUCT}): update to ${VERSION}"
+
+          cleanup_git_credentials() {
+            git config --local --unset-all credential.helper >/dev/null 2>&1 || :
+          }
+          trap cleanup_git_credentials EXIT
+          git config --local credential.helper '!gh auth git-credential'
 
           LEASE="refs/heads/${RELEASE_BRANCH}:${REMOTE_BRANCH_SHA}"
           git push --force-with-lease="$LEASE" origin "HEAD:refs/heads/${RELEASE_BRANCH}"
 
           PR_TITLE="chore(${PRODUCT}): update to ${VERSION}"
           PR_BODY="Automated Homebrew package update for ${SOURCE_REPOSITORY} ${RELEASE_TAG}."
-          PR_NUMBER="$(gh api --method GET repos/sonim1/homebrew-tap/pulls -f state=open -f base=main -f "head=sonim1:${RELEASE_BRANCH}" --jq '.[0].number // empty')"
+          find_open_pr() {
+            gh api --method GET repos/sonim1/homebrew-tap/pulls \
+              -f state=open \
+              -f base=main \
+              -f "head=sonim1:${RELEASE_BRANCH}" \
+              --jq '.[0].number // empty'
+          }
+
+          PR_NUMBER="$(find_open_pr)"
           if [[ -z "$PR_NUMBER" ]]; then
-            PR_URL="$(gh pr create --repo sonim1/homebrew-tap --base main --head "$RELEASE_BRANCH" --title "$PR_TITLE" --body "$PR_BODY")"
-            PR_NUMBER="$(gh pr view "$PR_URL" --repo sonim1/homebrew-tap --json number --jq '.number')"
+            if PR_URL="$(gh pr create --repo sonim1/homebrew-tap --base main --head "$RELEASE_BRANCH" --title "$PR_TITLE" --body "$PR_BODY")"; then
+              PR_NUMBER="$(gh pr view "$PR_URL" --repo sonim1/homebrew-tap --json number --jq '.number')"
+            else
+              CREATE_STATUS=$?
+              PR_NUMBER="$(find_open_pr)"
+              if [[ -z "$PR_NUMBER" ]]; then
+                exit "$CREATE_STATUS"
+              fi
+            fi
           fi
 
           if [[ ! "$PR_NUMBER" =~ ^[0-9]+$ ]]; then
@@ -185,4 +299,5 @@ jobs:
             exit 1
           fi
 
-          gh pr merge "$PR_NUMBER" --repo sonim1/homebrew-tap --auto --squash
+          HEAD_COMMIT="$(git rev-parse HEAD)"
+          gh pr merge "$PR_NUMBER" --repo sonim1/homebrew-tap --auto --squash --match-head-commit "$HEAD_COMMIT"
