@@ -6,6 +6,7 @@ require "json"
 require "minitest/autorun"
 require "open3"
 require "pathname"
+require "psych"
 require "rbconfig"
 require "tmpdir"
 
@@ -24,6 +25,8 @@ class UpdateReleaseTest < Minitest::Test
     "Templates/Casks/updatebar-app.rb.erb",
     "Templates/Formula/updatebar-tui.rb.erb",
   ].freeze
+  CI_WORKFLOW = REPOSITORY_ROOT.join(".github/workflows/ci.yml")
+  CHECKOUT_ACTION = "actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5"
 
   def setup
     @temporary_directory = Dir.mktmpdir("update-release-test-")
@@ -374,7 +377,78 @@ class UpdateReleaseTest < Minitest::Test
     assert_match(/invalid option/, abbreviated_option.fetch(:stderr))
   end
 
+  def test_ci_workflow_triggers_only_for_pull_requests_with_read_permissions
+    workflow = ci_workflow
+
+    assert_equal({ "pull_request" => nil }, workflow.fetch("on"))
+    assert_equal({ "contents" => "read" }, workflow.fetch("permissions"))
+  end
+
+  def test_ci_workflow_declares_contracts_and_homebrew_jobs
+    jobs = ci_workflow.fetch("jobs")
+
+    assert_equal %w[contracts homebrew], jobs.keys.sort
+  end
+
+  def test_contracts_job_runs_pinned_contract_checks_on_linux
+    job = ci_workflow.fetch("jobs").fetch("contracts")
+
+    assert_equal "ubuntu-latest", job.fetch("runs-on")
+    steps = job.fetch("steps")
+    assert_equal 3, steps.length
+    assert_equal CHECKOUT_ACTION, steps.fetch(0).fetch("uses")
+    assert_equal false, steps.fetch(0).fetch("with").fetch("persist-credentials")
+    assert_equal "ruby test/update-release-test.rb", steps.fetch(1).fetch("run")
+    assert_equal "bash test/test-changed-packages-test.sh", steps.fetch(2).fetch("run")
+  end
+
+  def test_homebrew_job_fetches_main_and_runs_changed_package_checks_on_macos
+    job = ci_workflow.fetch("jobs").fetch("homebrew")
+
+    assert_equal "macos-15", job.fetch("runs-on")
+    steps = job.fetch("steps")
+    assert_equal 3, steps.length
+    assert_equal CHECKOUT_ACTION, steps.fetch(0).fetch("uses")
+    assert_equal 0, steps.fetch(0).fetch("with").fetch("fetch-depth")
+    assert_equal false, steps.fetch(0).fetch("with").fetch("persist-credentials")
+    assert_equal "git fetch --no-tags origin main:refs/remotes/origin/main", steps.fetch(1).fetch("run")
+    assert_equal "scripts/test-changed-packages.sh origin/main", steps.fetch(2).fetch("run")
+  end
+
+  def test_ci_workflow_has_no_job_secrets_or_write_permissions_and_pins_every_action
+    workflow = ci_workflow
+
+    refute workflow.key?("secrets")
+    workflow.fetch("jobs").each do |job_name, job|
+      refute job.key?("permissions"), "#{job_name} must not override permissions"
+      refute job.key?("secrets"), "#{job_name} must not receive secrets"
+    end
+
+    collect_uses(workflow).each do |uses|
+      assert_match(/\Aactions\/[^@]+@[0-9a-f]{40}\z/, uses)
+    end
+    refute_match(/\bsecrets\./, CI_WORKFLOW.read)
+    refute_match(/\bwrite\b/, workflow.fetch("permissions").values.join(" "))
+  end
+
   private
+
+  def ci_workflow
+    assert CI_WORKFLOW.file?, "expected #{CI_WORKFLOW} to exist"
+
+    Psych.safe_load(CI_WORKFLOW.read, aliases: false)
+  end
+
+  def collect_uses(value)
+    case value
+    when Hash
+      value.flat_map { |key, child| key == "uses" ? [child] : collect_uses(child) }
+    when Array
+      value.flat_map { |child| collect_uses(child) }
+    else
+      []
+    end
+  end
 
   def switchtab_manifest
     {

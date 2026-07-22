@@ -1,0 +1,23 @@
+name: CI
+'on':
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  contracts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
+      - run: ruby test/update-release-test.rb
+      - run: bash test/test-changed-packages-test.sh
+  homebrew:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - run: git fetch --no-tags origin main:refs/remotes/origin/main
+      - run: scripts/test-changed-packages.sh origin/main
