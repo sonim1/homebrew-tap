@@ -394,25 +394,25 @@ class UpdateReleaseTest < Minitest::Test
     job = ci_workflow.fetch("jobs").fetch("contracts")
 
     assert_equal "ubuntu-latest", job.fetch("runs-on")
+    assert_equal 10, job["timeout-minutes"]
     steps = job.fetch("steps")
-    assert_equal 3, steps.length
-    assert_equal CHECKOUT_ACTION, steps.fetch(0).fetch("uses")
-    assert_equal false, steps.fetch(0).fetch("with").fetch("persist-credentials")
-    assert_equal "ruby test/update-release-test.rb", steps.fetch(1).fetch("run")
-    assert_equal "bash test/test-changed-packages-test.sh", steps.fetch(2).fetch("run")
+    checkout = find_step_with_uses(steps, CHECKOUT_ACTION)
+    assert_equal false, checkout.fetch("with").fetch("persist-credentials")
+    assert_run_step(steps, "ruby test/update-release-test.rb")
+    assert_run_step(steps, "bash test/test-changed-packages-test.sh")
   end
 
   def test_homebrew_job_fetches_main_and_runs_changed_package_checks_on_macos
     job = ci_workflow.fetch("jobs").fetch("homebrew")
 
     assert_equal "macos-15", job.fetch("runs-on")
+    assert_equal 30, job["timeout-minutes"]
     steps = job.fetch("steps")
-    assert_equal 3, steps.length
-    assert_equal CHECKOUT_ACTION, steps.fetch(0).fetch("uses")
-    assert_equal 0, steps.fetch(0).fetch("with").fetch("fetch-depth")
-    assert_equal false, steps.fetch(0).fetch("with").fetch("persist-credentials")
-    assert_equal "git fetch --no-tags origin main:refs/remotes/origin/main", steps.fetch(1).fetch("run")
-    assert_equal "scripts/test-changed-packages.sh origin/main", steps.fetch(2).fetch("run")
+    checkout = find_step_with_uses(steps, CHECKOUT_ACTION)
+    assert_equal 0, checkout.fetch("with").fetch("fetch-depth")
+    assert_equal false, checkout.fetch("with").fetch("persist-credentials")
+    assert_run_step(steps, "git fetch --no-tags origin main:refs/remotes/origin/main")
+    assert_run_step(steps, "scripts/test-changed-packages.sh origin/main")
   end
 
   def test_ci_workflow_has_no_job_secrets_or_write_permissions_and_pins_every_action
@@ -437,6 +437,14 @@ class UpdateReleaseTest < Minitest::Test
     assert CI_WORKFLOW.file?, "expected #{CI_WORKFLOW} to exist"
 
     Psych.safe_load(CI_WORKFLOW.read, aliases: false)
+  end
+
+  def find_step_with_uses(steps, uses)
+    steps.find { |step| step["uses"] == uses } || flunk("expected a step using #{uses}")
+  end
+
+  def assert_run_step(steps, command)
+    assert steps.any? { |step| step["run"] == command }, "expected a step running #{command}"
   end
 
   def collect_uses(value)
