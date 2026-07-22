@@ -6,9 +6,15 @@ BREW_BIN="${BREW_BIN:-brew}"
 APPLICATIONS_DIR="${APPLICATIONS_DIR:-/Applications}"
 GIT_BIN="${GIT_BIN:-git}"
 
-CHANGED_PATHS="$("$GIT_BIN" diff --name-only "$BASE_REF"...HEAD)"
+CHANGED_PATHS_FILE="$(mktemp "${TMPDIR:-/tmp}/test-changed-packages.XXXXXX")"
+cleanup() {
+  rm -f "$CHANGED_PATHS_FILE" || :
+}
+trap cleanup EXIT HUP INT TERM
 
-while IFS= read -r path || [ -n "$path" ]; do
+"$GIT_BIN" diff --name-only -z "$BASE_REF"...HEAD -- > "$CHANGED_PATHS_FILE"
+
+while IFS= read -r -d '' path; do
   case "$path" in
     Formula/updatebar.rb|Formula/updatebar-tui.rb|Casks/switchtab.rb|Casks/updatebar-app.rb)
       ;;
@@ -17,11 +23,9 @@ while IFS= read -r path || [ -n "$path" ]; do
       exit 64
       ;;
   esac
-done <<EOF
-$CHANGED_PATHS
-EOF
+done < "$CHANGED_PATHS_FILE"
 
-while IFS= read -r path || [ -n "$path" ]; do
+while IFS= read -r -d '' path; do
   case "$path" in
     Formula/updatebar.rb|Formula/updatebar-tui.rb)
       token="${path#Formula/}"
@@ -45,6 +49,4 @@ while IFS= read -r path || [ -n "$path" ]; do
       fi
       ;;
   esac
-done <<EOF
-$CHANGED_PATHS
-EOF
+done < "$CHANGED_PATHS_FILE"

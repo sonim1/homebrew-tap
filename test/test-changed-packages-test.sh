@@ -209,6 +209,26 @@ test_unknown_cask_definition_is_rejected_before_brew() {
   assert_no_brew_calls
 }
 
+test_newline_formula_definition_is_rejected_before_brew() {
+  unset RUN_FAIL_LINE RUN_BASE_OVERRIDE RUN_CREATE_APP
+  changed_path=$'Formula/odd\nname.rb'
+  create_repo unknown-formula-newline "$changed_path"
+  run_script
+  assert_equal 64 "$RUN_STATUS" "newline Formula definition should exit 64"
+  assert_contains "$RUN_STDERR_CONTENTS" "unsupported package definition" "newline Formula error should be clear"
+  assert_no_brew_calls
+}
+
+test_quoted_cask_definition_is_rejected_before_brew() {
+  unset RUN_FAIL_LINE RUN_BASE_OVERRIDE RUN_CREATE_APP
+  changed_path='Casks/odd\name".rb'
+  create_repo unknown-cask-quoted "$changed_path"
+  run_script
+  assert_equal 64 "$RUN_STATUS" "quoted Cask definition should exit 64"
+  assert_contains "$RUN_STDERR_CONTENTS" "unsupported package definition" "quoted Cask error should be clear"
+  assert_no_brew_calls
+}
+
 test_missing_base_argument_is_clear() {
   unset RUN_FAIL_LINE RUN_BASE_OVERRIDE RUN_CREATE_APP
   create_repo missing-argument README.md
@@ -265,6 +285,8 @@ test_changed_updatebar_app_cask
 test_unrelated_paths_are_ignored_without_eval
 test_unknown_formula_definition_is_rejected_before_brew
 test_unknown_cask_definition_is_rejected_before_brew
+test_newline_formula_definition_is_rejected_before_brew
+test_quoted_cask_definition_is_rejected_before_brew
 test_missing_base_argument_is_clear
 test_missing_base_ref_propagates_git_error
 test_brew_failures_stop_later_commands
