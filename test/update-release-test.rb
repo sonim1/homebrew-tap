@@ -495,6 +495,7 @@ class UpdateReleaseTest < Minitest::Test
     assert_includes script, "gh api repos/sonim1/homebrew-tap"
     assert_includes script, ".allow_auto_merge == true"
     assert_includes script, "repos/sonim1/homebrew-tap/branches/main/protection/required_status_checks"
+    assert_includes script, ".strict == true"
     assert_includes script, '["contracts", "homebrew"]'
     assert_includes script, ".contexts"
     assert_includes script, ".checks"
@@ -526,6 +527,23 @@ class UpdateReleaseTest < Minitest::Test
     refute result.fetch(:status).success?
     assert_equal 2, remote_branch_status(repository.fetch(:remote), "release/switchtab-1.2.3")
     assert_equal %w[api api], workflow_tool_calls.map { |call| call.fetch("argv").first }
+  end
+
+  def test_preflight_rejects_false_or_missing_strict_status_check_enforcement_before_mutation
+    repository = create_workflow_repository
+    %w[strict-false strict-missing].each do |schema|
+      clear_workflow_tool_state
+      result = run_workflow_sequence(
+        %w[preflight publish-pr],
+        directory: repository.fetch(:worktree),
+        environment: workflow_publish_environment.merge("FAKE_PROTECTION_SCHEMA" => schema),
+      )
+
+      assert_equal ["preflight"], result.fetch(:steps), schema
+      refute result.fetch(:status).success?, schema
+      assert_equal 2, remote_branch_status(repository.fetch(:remote), "release/switchtab-1.2.3"), schema
+      assert_equal %w[api api], workflow_tool_calls.map { |call| call.fetch("argv").first }, schema
+    end
   end
 
   def test_preflight_propagates_repository_api_failures
@@ -1020,6 +1038,10 @@ class UpdateReleaseTest < Minitest::Test
                      }
                    when "missing-homebrew"
                      { "strict" => true, "contexts" => ["contracts"], "checks" => [] }
+                   when "strict-false"
+                     { "strict" => false, "contexts" => %w[contracts homebrew], "checks" => [] }
+                   when "strict-missing"
+                     { "contexts" => %w[contracts homebrew], "checks" => [] }
                    else
                      { "strict" => true, "contexts" => nil, "checks" => nil }
                    end

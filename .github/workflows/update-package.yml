@@ -126,18 +126,20 @@ jobs:
             if type != "object" then
               false
             else
-              (
-                (if (.contexts | type) == "array" then
-                   [.contexts[] | select(type == "string")]
-                 else [] end) +
-                (if (.checks | type) == "array" then
-                   [.checks[] | select(type == "object") | .context | select(type == "string")]
-                 else [] end)
-              ) as $contexts
-              | (["contracts", "homebrew"] - $contexts | length == 0)
+              (.strict == true) and (
+                (
+                  (if (.contexts | type) == "array" then
+                     [.contexts[] | select(type == "string")]
+                   else [] end) +
+                  (if (.checks | type) == "array" then
+                     [.checks[] | select(type == "object") | .context | select(type == "string")]
+                   else [] end)
+                ) as $contexts
+                | (["contracts", "homebrew"] - $contexts | length == 0)
+              )
             end
           ' <<< "$REQUIRED_STATUS_CHECKS" >/dev/null; then
-            printf 'Branch protection must require exact contracts and homebrew status contexts\n' >&2
+            printf 'Branch protection must strictly require exact contracts and homebrew status contexts\n' >&2
             exit 1
           fi
 
