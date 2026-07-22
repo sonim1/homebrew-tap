@@ -161,7 +161,7 @@ class ReleaseUpdater
       unless source["kind"] == configuration.fetch(:kind)
         raise ReleaseUpdateError, "#{token} must have source kind #{configuration.fetch(:kind)}"
       end
-      validate_source(token, source, configuration.fetch(:kind))
+      validate_source(token, source, configuration.fetch(:kind), version)
       packages_by_token[token] = package
     end
 
@@ -172,7 +172,7 @@ class ReleaseUpdater
     packages_by_token
   end
 
-  def validate_source(token, source, kind)
+  def validate_source(token, source, kind, version)
     expected_fields = %w[kind sha256]
     if kind == "release-asset"
       expected_fields << "name"
@@ -191,6 +191,26 @@ class ReleaseUpdater
     unless name.is_a?(String) && ASSET_NAME_PATTERN.match?(name)
       raise ReleaseUpdateError, "release asset name must be a safe basename for #{token}"
     end
+
+    validate_canonical_asset_name(token, name, version)
+  end
+
+  def validate_canonical_asset_name(token, name, version)
+    case token
+    when "switchtab"
+      pattern = /\ASwitchTab-#{Regexp.escape(version)}-[0-9]+\.dmg\z/
+      return if pattern.match?(name)
+
+      raise ReleaseUpdateError,
+            "switchtab release asset name must match SwitchTab-#{version}-<numeric build>.dmg"
+    when "updatebar"
+      expected_name = "updatebar-#{version}-macos-arm64.tar.gz"
+    when "updatebar-app"
+      expected_name = "UpdateBar-#{version}-macos-arm64.dmg"
+    end
+    return if name == expected_name
+
+    raise ReleaseUpdateError, "#{token} release asset name must be #{expected_name}"
   end
 
   def validate_exact_fields(object, expected_fields, context)

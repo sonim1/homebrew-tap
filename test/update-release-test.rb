@@ -202,6 +202,34 @@ class UpdateReleaseTest < Minitest::Test
     end
   end
 
+  def test_rejects_noncanonical_switchtab_release_asset_names
+    ["SwitchTab-2.0.0-1.dmg", "SwitchTab-1.0.0-beta.dmg", "SwitchTab-1.0.0-1.zip"].each do |name|
+      manifest = switchtab_manifest
+      manifest.fetch("packages").fetch(0).fetch("source")["name"] = name
+      assert_rejected(manifest, /switchtab release asset name must match SwitchTab-1\.0\.0-<numeric build>\.dmg/)
+    end
+  end
+
+  def test_rejects_noncanonical_updatebar_cli_release_asset_names
+    ["updatebar-2.0.0-macos-arm64.tar.gz", "updatebar-1.0.0-macos-arm64.zip"].each do |name|
+      manifest = updatebar_manifest
+      cli_source = manifest.fetch("packages").find { |package| package.fetch("token") == "updatebar" }.fetch("source")
+      cli_source["name"] = name
+      assert_rejected(manifest, /updatebar release asset name must be updatebar-1\.0\.0-macos-arm64\.tar\.gz/,
+                      repository: "sonim1/UpdateBar")
+    end
+  end
+
+  def test_rejects_noncanonical_updatebar_app_release_asset_names
+    ["UpdateBar-2.0.0-macos-arm64.dmg", "UpdateBar-1.0.0-macos-arm64.zip"].each do |name|
+      manifest = updatebar_manifest
+      app_source = manifest.fetch("packages").find { |package| package.fetch("token") == "updatebar-app" }.fetch("source")
+      app_source["name"] = name
+      assert_rejected(manifest, /updatebar-app release asset name must be UpdateBar-1\.0\.0-macos-arm64\.dmg/,
+                      repository: "sonim1/UpdateBar")
+    end
+  end
+
   def test_rejects_an_asset_name_for_a_github_tag_archive
     manifest = updatebar_manifest
     tui_source = manifest.fetch("packages").find { |package| package.fetch("token") == "updatebar-tui" }.fetch("source")
