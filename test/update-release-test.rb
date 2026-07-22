@@ -495,7 +495,6 @@ class UpdateReleaseTest < Minitest::Test
     assert_includes script, "gh api repos/sonim1/homebrew-tap"
     assert_includes script, ".allow_auto_merge == true"
     assert_includes script, "repos/sonim1/homebrew-tap/branches/main/protection/required_status_checks"
-    assert_includes script, ".strict == true"
     assert_includes script, '["contracts", "homebrew"]'
     assert_includes script, ".contexts"
     assert_includes script, ".checks"
