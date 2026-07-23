@@ -198,7 +198,7 @@ class ReleaseUpdater
   def validate_canonical_asset_name(token, name, version)
     case token
     when "switchtab"
-      pattern = /\ASwitchTab-#{Regexp.escape(version)}-[0-9]+\.dmg\z/
+      pattern = /\ASwitchTab-#{Regexp.escape(version)}-[0-9]+(?:\.[0-9]+){0,2}\.dmg\z/
       return if pattern.match?(name)
 
       raise ReleaseUpdateError,

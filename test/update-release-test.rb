@@ -215,6 +215,32 @@ class UpdateReleaseTest < Minitest::Test
     end
   end
 
+  def test_accepts_every_switchtab_producer_build_version_shape
+    %w[1 1.1 1.1.1].each do |build_version|
+      asset_name = "SwitchTab-1.0.0-#{build_version}.dmg"
+      write_fixture(asset_name, "switchtab #{build_version} dmg fixture\n")
+      manifest = switchtab_manifest
+      source = manifest.fetch("packages").fetch(0).fetch("source")
+      source["name"] = asset_name
+      source["sha256"] = fixture_sha256(asset_name)
+
+      result = run_updater(manifest)
+
+      assert_success(result)
+      assert_includes @tap.join("Casks/switchtab.rb").binread, asset_name
+    end
+  end
+
+  def test_rejects_build_versions_outside_the_switchtab_producer_contract
+    ["", "1.1.1.1", "1.beta", "../1"].each do |build_version|
+      manifest = switchtab_manifest
+      manifest.fetch("packages").fetch(0).fetch("source")["name"] =
+        "SwitchTab-1.0.0-#{build_version}.dmg"
+
+      assert_rejected(manifest, /release asset name/)
+    end
+  end
+
   def test_rejects_noncanonical_updatebar_cli_release_asset_names
     ["updatebar-2.0.0-macos-arm64.tar.gz", "updatebar-1.0.0-macos-arm64.zip"].each do |name|
       manifest = updatebar_manifest
