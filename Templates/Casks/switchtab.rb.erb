@@ -1,0 +1,16 @@
+# frozen_string_literal: true
+
+cask "<%= token %>" do
+  version "<%= version %>"
+  sha256 "<%= sha256 %>"
+
+  url "<%= url %>"
+  name "SwitchTab"
+  desc "Fast macOS application switcher"
+  homepage "https://github.com/sonim1/switchtab"
+
+  depends_on arch: :arm64
+  depends_on macos: :ventura
+
+  app "SwitchTab.app"
+end
