@@ -228,7 +228,7 @@ class UpdateReleaseTest < Minitest::Test
       result = run_updater(manifest)
 
       assert_success(result)
-      assert_includes @tap.join("Casks/switchtab.rb").binread, asset_name
+      assert_includes @tap.join("Casks/switchtab.rb").binread, "SwitchTab-\#{version}-#{build_version}.dmg"
     end
   end
 
@@ -1498,7 +1498,7 @@ class UpdateReleaseTest < Minitest::Test
         version "1.0.0"
         sha256 "#{fixture_sha256(@switchtab_asset)}"
 
-        url "https://github.com/sonim1/switchtab/releases/download/v1.0.0/#{@switchtab_asset}"
+        url "https://github.com/sonim1/switchtab/releases/download/v\#{version}/SwitchTab-\#{version}-1.dmg"
         name "SwitchTab"
         desc "Fast macOS application switcher"
         homepage "https://github.com/sonim1/switchtab"
@@ -1546,7 +1546,7 @@ class UpdateReleaseTest < Minitest::Test
         version "1.0.0"
         sha256 "#{fixture_sha256(@updatebar_app_asset)}"
 
-        url "https://github.com/sonim1/UpdateBar/releases/download/v1.0.0/#{@updatebar_app_asset}"
+        url "https://github.com/sonim1/UpdateBar/releases/download/v\#{version}/UpdateBar-\#{version}-macos-arm64.dmg"
         name "UpdateBar"
         desc "Menu bar update tracker for local tools"
         homepage "https://github.com/sonim1/UpdateBar"

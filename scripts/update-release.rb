@@ -254,12 +254,14 @@ class ReleaseUpdater
       configuration = configurations.fetch(token)
       source = package.fetch("source")
       url = source_url(source)
+      versioned_url = url.gsub(version, '#{version}')
       template_path = ROOT.join(configuration.fetch(:template))
       template = template_path.binread
       rendered = ERB.new(template).result_with_hash(
         version: version,
         sha256: source.fetch("sha256"),
         url: url,
+        versioned_url: versioned_url,
         token: token,
       )
       rendered += "\n" unless rendered.end_with?("\n")
