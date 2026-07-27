@@ -28,6 +28,7 @@ class UpdateReleaseTest < Minitest::Test
   CI_WORKFLOW = REPOSITORY_ROOT.join(".github/workflows/ci.yml")
   UPDATE_WORKFLOW = REPOSITORY_ROOT.join(".github/workflows/update-package.yml")
   CHECKOUT_ACTION = "actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5"
+  SETUP_HOMEBREW_ACTION = "Homebrew/actions/setup-homebrew@1f8e202ffddf94def7f42f6fa3a482e821489f9c"
   APP_TOKEN_ACTION = "actions/create-github-app-token@67018539274d69449ef7c02e8e71183d1719ab42"
 
   def setup
@@ -427,12 +428,12 @@ class UpdateReleaseTest < Minitest::Test
                  job.fetch("steps").map { |step| normalize_ci_step("contracts", step) }
   end
 
-  def test_homebrew_job_fetches_main_and_runs_changed_package_checks_on_macos
+  def test_homebrew_job_sets_up_the_tap_then_runs_changed_package_checks_on_macos
     job = ci_workflow.fetch("jobs").fetch("homebrew")
 
     assert_equal "macos-15", job.fetch("runs-on")
     assert_equal 30, job["timeout-minutes"]
-    assert_equal %w[checkout fetch-main changed-packages],
+    assert_equal %w[setup-homebrew fetch-main changed-packages],
                  job.fetch("steps").map { |step| normalize_ci_step("homebrew", step) }
   end
 
@@ -446,7 +447,7 @@ class UpdateReleaseTest < Minitest::Test
     end
 
     collect_uses(workflow).each do |uses|
-      assert_match(/\Aactions\/[^@]+@[0-9a-f]{40}\z/, uses)
+      assert_match(/\A(?:actions|Homebrew\/actions)\/[^@]+@[0-9a-f]{40}\z/, uses)
     end
     refute_match(/\bsecrets\./, CI_WORKFLOW.read)
     refute_match(/\bwrite\b/, workflow.fetch("permissions").values.join(" "))
@@ -1240,10 +1241,11 @@ class UpdateReleaseTest < Minitest::Test
   def normalize_ci_step(job_name, step)
     return "unexpected:shape:#{step.class}" unless step.is_a?(Hash)
 
+    return "setup-homebrew" if job_name == "homebrew" && step == { "uses" => SETUP_HOMEBREW_ACTION }
+
     if step.keys.sort == %w[uses with] && step["uses"] == CHECKOUT_ACTION
       expected_with = case job_name
                       when "contracts" then { "persist-credentials" => false }
-                      when "homebrew" then { "fetch-depth" => 0, "persist-credentials" => false }
                       end
       return "checkout" if step["with"] == expected_with
     end
