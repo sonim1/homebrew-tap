@@ -76,8 +76,8 @@ fi
 
 if [ "${BREW_CREATE_APP:-1}" = "1" ] && [ "${1:-}" = "install" ] && [ "${2:-}" = "--cask" ]; then
   case "${3:-}" in
-    ./Casks/switchtab.rb) mkdir -p "${APPLICATIONS_DIR:?}/SwitchTab.app" ;;
-    ./Casks/updatebar-app.rb) mkdir -p "${APPLICATIONS_DIR:?}/UpdateBar.app" ;;
+    sonim1/tap/switchtab) mkdir -p "${APPLICATIONS_DIR:?}/SwitchTab.app" ;;
+    sonim1/tap/updatebar-app) mkdir -p "${APPLICATIONS_DIR:?}/UpdateBar.app" ;;
   esac
 fi
 BASH
@@ -151,7 +151,7 @@ test_changed_updatebar_formula() {
   create_repo formula-updatebar Formula/updatebar.rb
   run_script
   assert_success
-  assert_brew_log "$(printf 'audit\t--strict\tupdatebar\ninstall\t--formula\t./Formula/updatebar.rb\ntest\tupdatebar')"
+  assert_brew_log "$(printf 'audit\t--strict\tupdatebar\ninstall\t--formula\tsonim1/tap/updatebar\ntest\tupdatebar')"
 }
 
 test_changed_updatebar_tui_formula() {
@@ -159,7 +159,7 @@ test_changed_updatebar_tui_formula() {
   create_repo formula-updatebar-tui Formula/updatebar-tui.rb
   run_script
   assert_success
-  assert_brew_log "$(printf 'audit\t--strict\tupdatebar-tui\ninstall\t--formula\t./Formula/updatebar-tui.rb\ntest\tupdatebar-tui')"
+  assert_brew_log "$(printf 'audit\t--strict\tupdatebar-tui\ninstall\t--formula\tsonim1/tap/updatebar-tui\ntest\tupdatebar-tui')"
 }
 
 test_changed_switchtab_cask() {
@@ -167,7 +167,7 @@ test_changed_switchtab_cask() {
   create_repo cask-switchtab Casks/switchtab.rb
   run_script
   assert_success
-  assert_brew_log "$(printf 'audit\t--cask\t--strict\tswitchtab\ninstall\t--cask\t./Casks/switchtab.rb')"
+  assert_brew_log "$(printf 'audit\t--cask\t--strict\tswitchtab\ninstall\t--cask\tsonim1/tap/switchtab')"
   [ -d "$RUN_REPO/Applications/SwitchTab.app" ] || fail "SwitchTab.app was not verified in Applications"
 }
 
@@ -176,7 +176,7 @@ test_changed_updatebar_app_cask() {
   create_repo cask-updatebar-app Casks/updatebar-app.rb
   run_script
   assert_success
-  assert_brew_log "$(printf 'audit\t--cask\t--strict\tupdatebar-app\ninstall\t--cask\t./Casks/updatebar-app.rb')"
+  assert_brew_log "$(printf 'audit\t--cask\t--strict\tupdatebar-app\ninstall\t--cask\tsonim1/tap/updatebar-app')"
   [ -d "$RUN_REPO/Applications/UpdateBar.app" ] || fail "UpdateBar.app was not verified in Applications"
 }
 
@@ -251,7 +251,7 @@ test_missing_base_ref_propagates_git_error() {
 test_brew_failures_stop_later_commands() {
   for failed_line in \
     "$(printf 'audit\t--strict\tupdatebar')" \
-    "$(printf 'install\t--formula\t./Formula/updatebar.rb')" \
+    "$(printf 'install\t--formula\tsonim1/tap/updatebar')" \
     "$(printf 'test\tupdatebar')"; do
     unset RUN_BASE_OVERRIDE RUN_CREATE_APP
     RUN_FAIL_LINE="$failed_line"
@@ -261,7 +261,7 @@ test_brew_failures_stop_later_commands() {
     case "$failed_line" in
       audit*) expected="$failed_line" ;;
       install*) expected="$(printf 'audit\t--strict\tupdatebar\n%s' "$failed_line")" ;;
-      test*) expected="$(printf 'audit\t--strict\tupdatebar\ninstall\t--formula\t./Formula/updatebar.rb\n%s' "$failed_line")" ;;
+      test*) expected="$(printf 'audit\t--strict\tupdatebar\ninstall\t--formula\tsonim1/tap/updatebar\n%s' "$failed_line")" ;;
     esac
     assert_brew_log "$expected"
   done
@@ -274,7 +274,7 @@ test_cask_application_must_exist() {
   run_script
   assert_failure
   assert_contains "$RUN_STDERR_CONTENTS" "SwitchTab.app" "missing cask application should be identified"
-  assert_brew_log "$(printf 'audit\t--cask\t--strict\tswitchtab\ninstall\t--cask\t./Casks/switchtab.rb')"
+  assert_brew_log "$(printf 'audit\t--cask\t--strict\tswitchtab\ninstall\t--cask\tsonim1/tap/switchtab')"
 }
 
 create_fake_brew
