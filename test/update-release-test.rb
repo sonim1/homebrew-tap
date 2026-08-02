@@ -1584,7 +1584,6 @@ class UpdateReleaseTest < Minitest::Test
         desc "Ink terminal UI for UpdateBar"
         homepage "https://github.com/sonim1/UpdateBar"
         url "https://github.com/sonim1/UpdateBar/archive/refs/tags/v1.0.0.tar.gz"
-        version "1.0.0"
         sha256 "#{fixture_sha256("tag-archive.tar.gz")}"
         license "MIT"
 
