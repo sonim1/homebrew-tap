@@ -1,10 +1,10 @@
 # frozen_string_literal: true
 
 cask "updatebar-app" do
-  version "0.6.1"
-  sha256 "dcfc2d3edcf4e0edcace852881804836d79d2fa10b984da3b834833d6de9cbe0"
+  version "0.6.7"
+  sha256 "c1edc8875733cae63185e8bdad0cb27db9c9094692b62029573c3be808ef1f96"
 
-  url "https://github.com/sonim1/UpdateBar/releases/download/v#{version}/UpdateBar-#{version}-macos-arm64.app.tar.gz"
+  url "https://github.com/sonim1/UpdateBar/releases/download/v#{version}/UpdateBar-#{version}-macos-arm64.dmg"
   name "UpdateBar"
   desc "Menu bar update tracker for local tools"
   homepage "https://github.com/sonim1/UpdateBar"
