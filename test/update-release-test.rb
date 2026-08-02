@@ -1555,6 +1555,7 @@ class UpdateReleaseTest < Minitest::Test
         depends_on macos: :ventura
 
         app "UpdateBar.app"
+        binary "\#{appdir}/UpdateBar.app/Contents/Resources/updatebar"
 
         zap trash: [
           "~/.updatebar",
@@ -1563,8 +1564,8 @@ class UpdateReleaseTest < Minitest::Test
         ]
 
         caveats <<~EOS
-          For the updatebar CLI, install the formula:
-            brew install sonim1/tap/updatebar
+          The updatebar CLI is included with this app. For a CLI-only installation, use:
+            brew install --formula sonim1/tap/updatebar
 
           For the Open TUI menu item, install the terminal UI:
             brew install sonim1/tap/updatebar-tui
@@ -1583,7 +1584,6 @@ class UpdateReleaseTest < Minitest::Test
         desc "Ink terminal UI for UpdateBar"
         homepage "https://github.com/sonim1/UpdateBar"
         url "https://github.com/sonim1/UpdateBar/archive/refs/tags/v1.0.0.tar.gz"
-        version "1.0.0"
         sha256 "#{fixture_sha256("tag-archive.tar.gz")}"
         license "MIT"
 
@@ -1601,8 +1601,9 @@ class UpdateReleaseTest < Minitest::Test
 
         def caveats
           <<~EOS
-            updatebar-tui talks to the updatebar CLI. Install it with:
-              brew install sonim1/tap/updatebar
+            updatebar-tui talks to the updatebar CLI. Install it with either:
+              brew install --cask sonim1/tap/updatebar-app
+              brew install --formula sonim1/tap/updatebar
           EOS
         end
 

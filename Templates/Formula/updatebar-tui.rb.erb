@@ -6,7 +6,6 @@ class UpdatebarTui < Formula
   desc "Ink terminal UI for UpdateBar"
   homepage "https://github.com/sonim1/UpdateBar"
   url "<%= url %>"
-  version "<%= version %>"
   sha256 "<%= sha256 %>"
   license "MIT"
 
@@ -24,8 +23,9 @@ class UpdatebarTui < Formula
 
   def caveats
     <<~EOS
-      updatebar-tui talks to the updatebar CLI. Install it with:
-        brew install sonim1/tap/updatebar
+      updatebar-tui talks to the updatebar CLI. Install it with either:
+        brew install --cask sonim1/tap/updatebar-app
+        brew install --formula sonim1/tap/updatebar
     EOS
   end
 

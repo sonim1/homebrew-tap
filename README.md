@@ -12,12 +12,22 @@ Tap the repository once:
 brew tap sonim1/tap
 ```
 
-The currently published packages are:
+Install the UpdateBar app and bundled CLI together:
 
 ```sh
-brew install sonim1/tap/updatebar
-brew install sonim1/tap/updatebar-tui
 brew install --cask sonim1/tap/updatebar-app
+```
+
+For a CLI-only installation, use the standalone formula instead:
+
+```sh
+brew install --formula sonim1/tap/updatebar
+```
+
+The terminal UI is optional and works with either CLI provider:
+
+```sh
+brew install sonim1/tap/updatebar-tui
 ```
 
 The `switchtab` cask is intentionally not installable until
