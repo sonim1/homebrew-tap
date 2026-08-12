@@ -1,8 +1,8 @@
 # frozen_string_literal: true
 
 cask "updatebar-app" do
-  version "0.6.14"
-  sha256 "1aefcd9612239d47f283e63f3112a9b6799fce3605e53e45148d62e39dd13c69"
+  version "0.6.15"
+  sha256 "6533d9f9dee3681c69fd988e3da3444cadcf62787769f8a04e4a6ddcba37cf41"
 
   url "https://github.com/sonim1/UpdateBar/releases/download/v#{version}/UpdateBar-#{version}-macos-arm64.dmg"
   name "UpdateBar"
