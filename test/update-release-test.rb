@@ -433,8 +433,38 @@ class UpdateReleaseTest < Minitest::Test
 
     assert_equal "macos-15", job.fetch("runs-on")
     assert_equal 30, job["timeout-minutes"]
-    assert_equal %w[setup-homebrew fetch-main changed-packages],
+    assert_equal %w[setup-homebrew unlink-legacy-openssl fetch-main changed-packages],
                  job.fetch("steps").map { |step| normalize_ci_step("homebrew", step) }
+  end
+
+  def test_homebrew_runner_unlinks_only_installed_legacy_openssl_and_propagates_failure
+    step = ci_workflow.fetch("jobs").fetch("homebrew").fetch("steps").find do |candidate|
+      candidate["name"] == "Unlink legacy OpenSSL on the runner"
+    end
+    refute_nil step
+    brew_log = @tap.join("brew-calls.log")
+    fake_brew = <<~BASH
+      brew() {
+        printf '%s\\n' "$*" >> "$BREW_LOG"
+        case "$1" in
+          list) return "$LIST_STATUS" ;;
+          unlink) return "$UNLINK_STATUS" ;;
+          *) return 99 ;;
+        esac
+      }
+    BASH
+
+    [[0, 0, 0], [1, 0, 0], [0, 19, 19]].each do |list_status, unlink_status, expected_status|
+      brew_log.write("")
+      _stdout, stderr, status = Open3.capture3(
+        { "BREW_LOG" => brew_log.to_s, "LIST_STATUS" => list_status.to_s, "UNLINK_STATUS" => unlink_status.to_s },
+        "bash", "-e", "-c", fake_brew + step.fetch("run"),
+      )
+      assert_equal expected_status, status.exitstatus, stderr
+      expected_calls = ["list --formula --versions openssl@1.1"]
+      expected_calls << "unlink openssl@1.1" if list_status.zero?
+      assert_equal expected_calls, brew_log.readlines(chomp: true)
+    end
   end
 
   def test_ci_workflow_has_no_job_secrets_or_write_permissions_and_pins_every_action
@@ -1242,6 +1272,11 @@ class UpdateReleaseTest < Minitest::Test
     return "unexpected:shape:#{step.class}" unless step.is_a?(Hash)
 
     return "setup-homebrew" if job_name == "homebrew" && step == { "uses" => SETUP_HOMEBREW_ACTION }
+
+    if job_name == "homebrew" && step.keys.sort == %w[name run] &&
+       step["name"] == "Unlink legacy OpenSSL on the runner"
+      return "unlink-legacy-openssl"
+    end
 
     if step.keys.sort == %w[uses with] && step["uses"] == CHECKOUT_ACTION
       expected_with = case job_name
