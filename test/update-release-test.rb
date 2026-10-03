@@ -1568,7 +1568,6 @@ class UpdateReleaseTest < Minitest::Test
         desc "CLI-first update tracker for local tools"
         homepage "https://github.com/sonim1/UpdateBar"
         url "https://github.com/sonim1/UpdateBar/releases/download/v1.0.0/#{@updatebar_asset}"
-        version "1.0.0"
         sha256 "#{fixture_sha256(@updatebar_asset)}"
 
         depends_on arch: :arm64
