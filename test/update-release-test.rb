@@ -1551,7 +1551,7 @@ class UpdateReleaseTest < Minitest::Test
         homepage "https://github.com/sonim1/switchtab"
 
         depends_on arch: :arm64
-        depends_on macos: :ventura
+        depends_on macos: :sonoma
 
         app "SwitchTab.app"
       end
