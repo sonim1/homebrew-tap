@@ -18,5 +18,12 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: Homebrew/actions/setup-homebrew@1f8e202ffddf94def7f42f6fa3a482e821489f9c
+      - name: Unlink legacy OpenSSL on the runner
+        run: |
+          brew_prefix="$(brew --prefix)"
+          openssl_link="$brew_prefix/bin/openssl"
+          if [[ -L "$openssl_link" && "$(readlink "$openssl_link")" == "$brew_prefix/opt/openssl@1.1/bin/openssl" ]]; then
+            unlink "$openssl_link"
+          fi
       - run: git fetch --no-tags origin main:refs/remotes/origin/main
       - run: scripts/test-changed-packages.sh origin/main

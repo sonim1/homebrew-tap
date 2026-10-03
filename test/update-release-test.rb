@@ -433,8 +433,50 @@ class UpdateReleaseTest < Minitest::Test
 
     assert_equal "macos-15", job.fetch("runs-on")
     assert_equal 30, job["timeout-minutes"]
-    assert_equal %w[setup-homebrew fetch-main changed-packages],
+    assert_equal %w[setup-homebrew unlink-legacy-openssl fetch-main changed-packages],
                  job.fetch("steps").map { |step| normalize_ci_step("homebrew", step) }
+  end
+
+  def test_homebrew_runner_removes_only_the_legacy_openssl_symlink_and_propagates_failure
+    step = ci_workflow.fetch("jobs").fetch("homebrew").fetch("steps").find do |candidate|
+      candidate["name"] == "Unlink legacy OpenSSL on the runner"
+    end
+    refute_nil step
+    brew_prefix = @tap.join("homebrew")
+    openssl_link = brew_prefix.join("bin/openssl")
+    FileUtils.mkdir_p(openssl_link.dirname)
+    legacy_target = brew_prefix.join("opt/openssl@1.1/bin/openssl").to_s
+    current_target = brew_prefix.join("opt/openssl@3/bin/openssl").to_s
+    fake_brew = <<~BASH
+      brew() {
+        [ "$*" = "--prefix" ] || return 99
+        printf '%s\\n' "$BREW_PREFIX"
+      }
+    BASH
+
+    [
+      [legacy_target, "", 0, false],
+      [current_target, "", 0, true],
+      ["regular-file", "", 0, true],
+      [nil, "", 0, false],
+      [legacy_target, "brew() { return 17; }", 17, true],
+      [legacy_target, "unlink() { return 19; }", 19, true],
+    ].each do |target, failure, expected_status, remains|
+      if target == "regular-file"
+        openssl_link.write("runner executable fixture\n")
+      elsif target
+        File.symlink(target, openssl_link)
+      end
+      _stdout, stderr, status = Open3.capture3(
+        { "BREW_PREFIX" => brew_prefix.to_s },
+        "bash", "-e", "-c", fake_brew + failure + "\n" + step.fetch("run"),
+      )
+      assert_equal expected_status, status.exitstatus, stderr
+      assert_equal remains, openssl_link.exist? || openssl_link.symlink?, target.inspect
+      assert_equal target, openssl_link.readlink.to_s if remains && target != "regular-file"
+      assert_equal "runner executable fixture\n", openssl_link.read if target == "regular-file"
+      File.unlink(openssl_link) if remains
+    end
   end
 
   def test_ci_workflow_has_no_job_secrets_or_write_permissions_and_pins_every_action
@@ -1243,6 +1285,11 @@ class UpdateReleaseTest < Minitest::Test
 
     return "setup-homebrew" if job_name == "homebrew" && step == { "uses" => SETUP_HOMEBREW_ACTION }
 
+    if job_name == "homebrew" && step.keys.sort == %w[name run] &&
+       step["name"] == "Unlink legacy OpenSSL on the runner"
+      return "unlink-legacy-openssl"
+    end
+
     if step.keys.sort == %w[uses with] && step["uses"] == CHECKOUT_ACTION
       expected_with = case job_name
                       when "contracts" then { "persist-credentials" => false }
@@ -1521,7 +1568,6 @@ class UpdateReleaseTest < Minitest::Test
         desc "CLI-first update tracker for local tools"
         homepage "https://github.com/sonim1/UpdateBar"
         url "https://github.com/sonim1/UpdateBar/releases/download/v1.0.0/#{@updatebar_asset}"
-        version "1.0.0"
         sha256 "#{fixture_sha256(@updatebar_asset)}"
 
         depends_on arch: :arm64
