@@ -70,6 +70,8 @@ for argument in "$@"; do
 done
 printf '%s\n' "$line" >> "${BREW_LOG:?}"
 
+cat >/dev/null
+
 if [ "${BREW_FAIL_LINE:-}" = "$line" ]; then
   exit "${BREW_FAIL_STATUS:-23}"
 fi
@@ -180,6 +182,14 @@ test_changed_updatebar_app_cask() {
   [ -d "$RUN_REPO/Applications/UpdateBar.app" ] || fail "UpdateBar.app was not verified in Applications"
 }
 
+test_brew_stdin_cannot_consume_remaining_packages() {
+  unset RUN_FAIL_LINE RUN_BASE_OVERRIDE RUN_CREATE_APP
+  create_repo brew-reads-stdin Casks/updatebar-app.rb Formula/updatebar-tui.rb Formula/updatebar.rb
+  run_script
+  assert_success
+  assert_brew_log "$(printf 'audit\t--cask\t--strict\tupdatebar-app\ninstall\t--cask\tsonim1/tap/updatebar-app\naudit\t--strict\tupdatebar-tui\ninstall\t--formula\tsonim1/tap/updatebar-tui\ntest\tupdatebar-tui\naudit\t--strict\tupdatebar\ninstall\t--formula\tsonim1/tap/updatebar\ntest\tupdatebar')"
+}
+
 test_unrelated_paths_are_ignored_without_eval() {
   unset RUN_FAIL_LINE RUN_BASE_OVERRIDE RUN_CREATE_APP
   marker="$TEMP_ROOT/unexpected-command-executed"
@@ -282,6 +292,7 @@ test_changed_updatebar_formula
 test_changed_updatebar_tui_formula
 test_changed_switchtab_cask
 test_changed_updatebar_app_cask
+test_brew_stdin_cannot_consume_remaining_packages
 test_unrelated_paths_are_ignored_without_eval
 test_unknown_formula_definition_is_rejected_before_brew
 test_unknown_cask_definition_is_rejected_before_brew

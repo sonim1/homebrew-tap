@@ -30,15 +30,15 @@ while IFS= read -r -d '' path; do
     Formula/updatebar.rb|Formula/updatebar-tui.rb)
       token="${path#Formula/}"
       token="${token%.rb}"
-      "$BREW_BIN" audit --strict "$token"
-      "$BREW_BIN" install --formula "sonim1/tap/$token"
-      "$BREW_BIN" test "$token"
+      "$BREW_BIN" audit --strict "$token" </dev/null
+      "$BREW_BIN" install --formula "sonim1/tap/$token" </dev/null
+      "$BREW_BIN" test "$token" </dev/null
       ;;
     Casks/switchtab.rb|Casks/updatebar-app.rb)
       token="${path#Casks/}"
       token="${token%.rb}"
-      "$BREW_BIN" audit --cask --strict "$token"
-      "$BREW_BIN" install --cask "sonim1/tap/$token"
+      "$BREW_BIN" audit --cask --strict "$token" </dev/null
+      "$BREW_BIN" install --cask "sonim1/tap/$token" </dev/null
       case "$token" in
         switchtab) application_path="$APPLICATIONS_DIR/SwitchTab.app" ;;
         updatebar-app) application_path="$APPLICATIONS_DIR/UpdateBar.app" ;;
