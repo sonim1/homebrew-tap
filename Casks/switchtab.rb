@@ -1,10 +1,10 @@
 # frozen_string_literal: true
 
 cask "switchtab" do
-  version "1.1.28"
-  sha256 "36d02fb7319310032245448c515dd17ab58e19128d309d6a1d0cc35d62d8af5a"
+  version "1.1.29"
+  sha256 "b6feeb97ee0a52ade1b48e12f6f4e2276d04973385018518b5a5b641fdf6e76d"
 
-  url "https://github.com/sonim1/switchtab/releases/download/v#{version}/SwitchTab-#{version}-39.dmg"
+  url "https://github.com/sonim1/switchtab/releases/download/v#{version}/SwitchTab-#{version}-40.dmg"
   name "SwitchTab"
   desc "Fast macOS application switcher"
   homepage "https://github.com/sonim1/switchtab"
