@@ -5,8 +5,8 @@
 class Updatebar < Formula
   desc "CLI-first update tracker for local tools"
   homepage "https://github.com/sonim1/UpdateBar"
-  url "https://github.com/sonim1/UpdateBar/releases/download/v0.6.30/updatebar-0.6.30-macos-arm64.tar.gz"
-  sha256 "983ed910fd35eef1448b8ca5c853de32fdc9b4dab83bc50a1eccee9985caeaa1"
+  url "https://github.com/sonim1/UpdateBar/releases/download/v0.6.31/updatebar-0.6.31-macos-arm64.tar.gz"
+  sha256 "35b280e7e431f460122a0dd88657c510bfb9c8b05a34d635b884c8a4875c8d4b"
 
   depends_on arch: :arm64
   depends_on macos: :ventura
